@@ -35,8 +35,8 @@ No es necesario instalar Python localmente si se usa Docker.
 ## Instalación rápida
 
 ```bash
-git clone https://github.com/TU_USUARIO/nexo-drive-asistencia.git
-cd nexo-drive-asistencia
+git clone https://github.com/LuisfrankJyG/SisAsistencia.git
+cd SisAsistencia
 docker compose up -d --build
 ```
 
