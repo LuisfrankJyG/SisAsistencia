@@ -1,0 +1,22 @@
+services:
+  database:
+    image: pgvector/pgvector:pg16
+    container_name: asistencia-database
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: asistencia
+      POSTGRES_USER: asistencia_app
+      POSTGRES_PASSWORD: cambia_esta_clave_local
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+  face-service:
+    build: ./face-service
+    container_name: asistencia-face-service
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+volumes:
+  postgres_data:
