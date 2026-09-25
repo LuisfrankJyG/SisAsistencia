@@ -10,6 +10,7 @@ const app = express()
 const port = Number(process.env.PORT || 3000)
 const secret = process.env.JWT_SECRET || 'solo-para-desarrollo-cambiar-en-produccion'
 const pool = new Pool({ connectionString: process.env.DATABASE_URL })
+const faceServiceUrl = process.env.FACE_SERVICE_URL || 'http://localhost:8000'
 app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }))
 app.use(express.json({ limit: '3mb' }))
 
@@ -24,6 +25,13 @@ async function bootstrapAdmin() {
   await pool.query("INSERT INTO users(username,password_hash,role) VALUES('admin',$1,'ADMIN')", [hash])
   console.log('Administrador inicial: admin / admin123')
 }
+async function faceEmbedding(imageBase64) {
+  const result = await fetch(`${faceServiceUrl}/embedding`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ image_base64: imageBase64 }) })
+  const payload = await result.json()
+  if (!result.ok) throw new Error(payload.detail || 'No se pudo validar el rostro.')
+  return payload
+}
+function workerSession(user) { return { token: sign(user), user: { id: user.id, username: user.username, role: user.role, firstName: user.first_name || 'Administrador', lastName: user.last_name || '' } } }
 function authenticate(req, res, next) { const token = req.headers.authorization?.replace('Bearer ', ''); if (!token) return res.status(401).json({ message: 'Sesión requerida.' }); try { req.auth = jwt.verify(token, secret); next() } catch { res.status(401).json({ message: 'Sesión vencida o inválida.' }) } }
 function adminOnly(req, res, next) { return req.auth.role === 'ADMIN' ? next() : res.status(403).json({ message: 'Solo administradores.' }) }
 
@@ -34,7 +42,21 @@ app.post('/api/auth/login', async (req, res) => {
   const { rows } = await pool.query('SELECT u.*,w.first_name,w.last_name FROM users u LEFT JOIN workers w ON w.id=u.worker_id WHERE u.username=$1', [input.data.username])
   const user = rows[0]
   if (!user || !user.active || !(await bcrypt.compare(input.data.password, user.password_hash))) return res.status(401).json({ message: 'Usuario o contraseña incorrectos.' })
-  res.json({ token: sign(user), user: { id: user.id, username: user.username, role: user.role, firstName: user.first_name || 'Administrador', lastName: user.last_name || '' } })
+  res.json(workerSession(user))
+})
+app.post('/api/auth/face', async (req, res) => {
+  const input = z.object({ document: z.string().min(5), imageBase64: z.string().min(100) }).safeParse(req.body)
+  if (!input.success) return res.status(400).json({ message: 'Documento e imagen son obligatorios.' })
+  try {
+    const embedding = await faceEmbedding(input.data.imageBase64)
+    const vector = `[${embedding.embedding.join(',')}]`
+    const { rows } = await pool.query(`SELECT u.id,u.username,u.role,u.active,w.first_name,w.last_name,
+      1 - (f.embedding <=> $2::vector) AS similarity FROM workers w JOIN users u ON u.worker_id=w.id JOIN facial_templates f ON f.worker_id=w.id
+      WHERE w.document_number=$1 AND w.active AND u.active AND f.active ORDER BY f.embedding <=> $2::vector LIMIT 1`, [input.data.document, vector])
+    const user = rows[0]
+    if (!user || Number(user.similarity) < 0.45) return res.status(401).json({ message: 'No se pudo confirmar la identidad facial.' })
+    res.json({ ...workerSession(user), similarity: Number(user.similarity) })
+  } catch (error) { res.status(422).json({ message: error.message }) }
 })
 app.get('/api/workers', authenticate, adminOnly, async (_req, res) => { const { rows } = await pool.query(`SELECT w.*,u.username,u.role,EXISTS(SELECT 1 FROM facial_templates f WHERE f.worker_id=w.id AND f.active) face_ready FROM workers w JOIN users u ON u.worker_id=w.id ORDER BY w.created_at DESC`); res.json(rows.map(mapWorker)) })
 app.post('/api/workers', authenticate, adminOnly, async (req, res) => {
@@ -42,6 +64,18 @@ app.post('/api/workers', authenticate, adminOnly, async (req, res) => {
   const d = parsed.data; const client = await pool.connect()
   try { await client.query('BEGIN'); const worker = (await client.query(`INSERT INTO workers(document_number,first_name,last_name,position,department,scheduled_start,scheduled_end) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`, [d.document,d.firstName,d.lastName,d.position || null,d.department || null,d.scheduleStart || '08:00',d.scheduleEnd || '17:00'])).rows[0]; const user = (await client.query(`INSERT INTO users(worker_id,username,password_hash,role) VALUES($1,$2,$3,'TRABAJADOR') RETURNING username,role`, [worker.id,d.username,await bcrypt.hash(d.password,12)])).rows[0]; await client.query('COMMIT'); res.status(201).json(mapWorker({ ...worker, ...user, face_ready: false })) }
   catch (error) { await client.query('ROLLBACK'); res.status(error.code === '23505' ? 409 : 500).json({ message: error.code === '23505' ? 'El documento o usuario ya existe.' : 'No se pudo crear el trabajador.' }) } finally { client.release() }
+})
+app.post('/api/workers/:id/facial-template', authenticate, adminOnly, async (req, res) => {
+  const input = z.object({ imageBase64: z.string().min(100), consent: z.literal(true) }).safeParse(req.body)
+  if (!input.success) return res.status(400).json({ message: 'Se requiere imagen y consentimiento biométrico explícito.' })
+  try {
+    const facial = await faceEmbedding(input.data.imageBase64)
+    if (facial.dimension !== 512) return res.status(422).json({ message: 'La dimensión del vector facial no es compatible.' })
+    const vector = `[${facial.embedding.join(',')}]`
+    await pool.query('UPDATE facial_templates SET active=false WHERE worker_id=$1', [req.params.id])
+    await pool.query('INSERT INTO facial_templates(worker_id,embedding,model_name,consented_at) VALUES($1,$2::vector,$3,now())', [req.params.id, vector, facial.model])
+    res.status(201).json({ faceReady: true, model: facial.model })
+  } catch (error) { res.status(422).json({ message: error.message }) }
 })
 app.patch('/api/workers/:id/role', authenticate, adminOnly, async (req, res) => { const role = z.enum(['ADMIN','TRABAJADOR']).safeParse(req.body.role); if (!role.success) return res.status(400).json({ message: 'Rol inválido.' }); const result = await pool.query('UPDATE users SET role=$1 WHERE worker_id=$2 RETURNING role', [role.data,req.params.id]); result.rowCount ? res.json(result.rows[0]) : res.status(404).json({ message: 'Trabajador no encontrado.' }) })
 app.post('/api/attendance/clock', authenticate, async (req, res) => { const { rows: users } = await pool.query('SELECT worker_id FROM users WHERE id=$1', [req.auth.sub]); if (!users[0]?.worker_id) return res.status(400).json({ message: 'La cuenta administradora no registra asistencia.' }); const { rows: previous } = await pool.query('SELECT record_type FROM attendance_records WHERE worker_id=$1 ORDER BY recorded_at DESC LIMIT 1', [users[0].worker_id]); const type = previous[0]?.record_type === 'ENTRADA' ? 'SALIDA' : 'ENTRADA'; const result = await pool.query(`INSERT INTO attendance_records(worker_id,record_type,method) VALUES($1,$2,'MANUAL') RETURNING id,record_type,recorded_at`, [users[0].worker_id,type]); res.status(201).json(result.rows[0]) })

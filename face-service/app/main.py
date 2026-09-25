@@ -39,6 +39,22 @@ def decode_image(value: str) -> np.ndarray:
     return image
 
 
+def validate_capture(image: np.ndarray, face) -> None:
+    """Controles de calidad; no sustituyen la prueba de vida anti-suplantación."""
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    brightness = float(gray.mean())
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    height, width = image.shape[:2]
+    x1, y1, x2, y2 = face.bbox.astype(int)
+    face_area = max(0, x2 - x1) * max(0, y2 - y1)
+    if brightness < 45 or brightness > 215:
+        raise HTTPException(422, "La iluminación no es adecuada. Busca una luz frontal uniforme.")
+    if sharpness < 35:
+        raise HTTPException(422, "La imagen está borrosa. Mantén la cámara estable.")
+    if face_area < (width * height * 0.04):
+        raise HTTPException(422, "Acércate un poco más a la cámara.")
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "engine": "insightface/buffalo_l", "embedding_dimension": 512}
@@ -46,9 +62,11 @@ def health():
 
 @app.post("/embedding")
 def embedding(payload: FaceImage):
-    faces = face_engine().get(decode_image(payload.image_base64))
+    image = decode_image(payload.image_base64)
+    faces = face_engine().get(image)
     if len(faces) != 1:
         raise HTTPException(422, "Se requiere exactamente un rostro visible.")
+    validate_capture(image, faces[0])
     vector = faces[0].normed_embedding.astype(float)
     return {
         "model": "insightface/buffalo_l",

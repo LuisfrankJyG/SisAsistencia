@@ -13,6 +13,7 @@ Prototipo web para gestionar asistencia del personal de una operación de transp
 - Panel de operación para turnos, transporte, taller y lavado.
 - PostgreSQL 16 con extensión `pgvector`.
 - Servicio Python/FastAPI para extraer y comparar embeddings faciales de 512 dimensiones.
+- Inicio de sesión por contraseña o rostro (el facial requiere documento y plantilla inscrita).
 
 ## Tecnologías
 
@@ -142,6 +143,7 @@ docker compose up -d --build
 - Solicita consentimiento explícito antes del registro facial.
 - Guarda embeddings, no fotografías, como mecanismo principal de identificación.
 - Añade detección de prueba de vida antes de usar el reconocimiento facial en producción.
+- Los controles actuales de iluminación, nitidez y tamaño del rostro mejoran la calidad de captura, pero **no son prueba de vida** y no bloquean una suplantación con foto o vídeo.
 - Ofrece un método alternativo de asistencia para incidencias o personas que no otorguen consentimiento.
 - Cambia `JWT_SECRET` y `POSTGRES_PASSWORD` antes de desplegar fuera del entorno local.
 
