@@ -2,32 +2,37 @@ import { useEffect, useRef, useState } from 'react'
 import './App.css'
 
 const initialForm = { firstName: '', lastName: '', document: '', position: '', department: '', username: '', password: '', schedule: '08:00 — 17:00' }
-const defaultAccounts = [{ id: 'admin-local', username: 'admin', password: 'admin123', role: 'ADMIN', firstName: 'Administrador', lastName: '' }]
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api'
 
 function App() {
   const [view, setView] = useState('inicio')
   const [isModalOpen, setModalOpen] = useState(false)
   const [step, setStep] = useState(1)
   const [form, setForm] = useState(initialForm)
-  const [workers, setWorkers] = useState(() => JSON.parse(localStorage.getItem('asistencia-workers') || '[]'))
-  const [accounts, setAccounts] = useState(() => JSON.parse(localStorage.getItem('asistencia-accounts') || JSON.stringify(defaultAccounts)))
-  const [session, setSession] = useState(() => JSON.parse(localStorage.getItem('asistencia-session') || 'null'))
+  const [workers, setWorkers] = useState([])
+  const [session, setSession] = useState(() => { const stored = JSON.parse(localStorage.getItem('asistencia-session') || 'null'); return stored?.token ? stored : null })
+  const [apiError, setApiError] = useState('')
   const [showProfileMenu, setShowProfileMenu] = useState(false)
   const [cameraError, setCameraError] = useState('')
   const [faceReady, setFaceReady] = useState(false)
   const videoRef = useRef(null)
 
   useEffect(() => {
-    localStorage.setItem('asistencia-workers', JSON.stringify(workers))
-  }, [workers])
-
-  useEffect(() => localStorage.setItem('asistencia-accounts', JSON.stringify(accounts)), [accounts])
-  useEffect(() => {
     if (session) localStorage.setItem('asistencia-session', JSON.stringify(session))
     else localStorage.removeItem('asistencia-session')
   }, [session])
 
   useEffect(() => () => stopCamera(), [])
+
+  useEffect(() => { if (session?.role === 'ADMIN') loadWorkers() }, [session?.token])
+
+  async function request(path, options = {}) {
+    const response = await fetch(`${API_URL}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(session?.token ? { Authorization: `Bearer ${session.token}` } : {}), ...options.headers } })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.message || 'No se pudo completar la operación.')
+    return data
+  }
+  async function loadWorkers() { try { setWorkers(await request('/workers')) } catch (error) { setApiError(error.message) } }
 
   function stopCamera() {
     videoRef.current?.srcObject?.getTracks().forEach((track) => track.stop())
@@ -65,14 +70,9 @@ function App() {
     setStep(step + 1)
   }
 
-  function saveWorker() {
+  async function saveWorker() {
     if (!faceReady) return
-    const id = crypto.randomUUID()
-    const worker = { id, ...form, role: 'TRABAJADOR', faceReady: true, createdAt: new Date().toISOString() }
-    setWorkers([worker, ...workers])
-    setAccounts([...accounts, { id, username: form.username, password: form.password, role: 'TRABAJADOR', firstName: form.firstName, lastName: form.lastName }])
-    closeWorkerModal()
-    setView('trabajadores')
+    try { const [scheduleStart, scheduleEnd] = form.schedule.split('—').map((value) => value.trim()); const worker = await request('/workers', { method: 'POST', body: JSON.stringify({ ...form, scheduleStart, scheduleEnd }) }); setWorkers([worker, ...workers]); closeWorkerModal(); setView('trabajadores') } catch (error) { setCameraError(error.message) }
   }
 
   function confirmFaceSample() {
@@ -83,24 +83,23 @@ function App() {
     setFaceReady(true)
   }
 
-  function login(username, password) {
-    const account = accounts.find((item) => item.username === username && item.password === password)
-    if (!account) return false
-    setSession({ id: account.id, username: account.username, role: account.role, firstName: account.firstName, lastName: account.lastName })
-    return true
+  async function login(username, password) {
+    try { const data = await request('/auth/login', { method: 'POST', body: JSON.stringify({ username, password }) }); setSession({ ...data.user, token: data.token }); return true } catch (error) { setApiError(error.message); return false }
   }
 
-  function changeRole(workerId, role) {
-    setWorkers(workers.map((worker) => worker.id === workerId ? { ...worker, role } : worker))
-    setAccounts(accounts.map((account) => account.id === workerId ? { ...account, role } : account))
+  async function changeRole(workerId, role) {
+    try { await request(`/workers/${workerId}/role`, { method: 'PATCH', body: JSON.stringify({ role }) }); setWorkers(workers.map((worker) => worker.id === workerId ? { ...worker, role } : worker)) } catch (error) { setApiError(error.message) }
+  }
+  async function clock() {
+    try { const record = await request('/attendance/clock', { method: 'POST' }); setApiError(''); return record } catch (error) { setApiError(error.message); throw error }
   }
 
-  if (!session) return <Login onLogin={login} />
+  if (!session) return <Login onLogin={login} apiError={apiError} />
 
   const content = {
     inicio: <Dashboard workers={workers} session={session} onNewWorker={openWorkerModal} onViewWorkers={() => setView('trabajadores')} />,
     trabajadores: <Workers workers={workers} isAdmin={session.role === 'ADMIN'} onNewWorker={openWorkerModal} onChangeRole={changeRole} />,
-    marcaciones: <Placeholder icon="◷" title="Turnos en vivo" detail="Aquí se verán las entradas y salidas del equipo de ruta, taller y lavado." action="Ir a la central" onAction={() => setView('inicio')} />,
+    marcaciones: <Attendance session={session} onClock={clock} />,
     reportes: <Placeholder icon="▤" title="Flota y operación" detail="Consulta asistencia, tiempos de servicio y actividad por turno." action="Ver equipo" onAction={() => setView('trabajadores')} />,
     configuracion: <Placeholder icon="⚙" title="Configuración del sistema" detail="Horarios, sedes, tolerancias y seguridad biométrica se configurarán aquí." action="Volver al resumen" onAction={() => setView('inicio')} />,
   }[view]
@@ -120,7 +119,7 @@ function App() {
         <div className="system-status"><i /> OPERACIÓN EN LÍNEA</div>
         <div className="profile-wrap"><button className="profile" onClick={() => setShowProfileMenu(!showProfileMenu)}><div className="avatar">{session.firstName.slice(0, 2).toUpperCase()}</div><span><strong>{session.firstName} {session.lastName}</strong><small>{session.role === 'ADMIN' ? 'Administrador' : 'Trabajador'}</small></span><b>⋮</b></button>{showProfileMenu && <div className="profile-menu"><button onClick={() => { setView('configuracion'); setShowProfileMenu(false) }}>Configuración</button><button onClick={() => setSession(null)}>Cerrar sesión</button></div>}</div>
       </aside>
-      <section className="content">{content}</section>
+      <section className="content">{apiError && <p className="error api-error">{apiError}</p>}{content}</section>
       {isModalOpen && <WorkerModal step={step} form={form} faceReady={faceReady} videoRef={videoRef} cameraError={cameraError} onChange={updateForm} onClose={closeWorkerModal} onContinue={continueForm} onBack={() => setStep(step - 1)} onCamera={startCamera} onFaceReady={confirmFaceSample} onSave={saveWorker} />}
     </main>
   )
@@ -130,15 +129,15 @@ function NavButton({ current, id, icon, label, onClick }) {
   return <button className={current === id ? 'nav-active' : ''} onClick={() => onClick(id)}><span>{icon}</span>{label}</button>
 }
 
-function Login({ onLogin }) {
+function Login({ onLogin, apiError }) {
   const [username, setUsername] = useState('admin')
   const [password, setPassword] = useState('admin123')
   const [error, setError] = useState('')
-  function submit(event) {
+  async function submit(event) {
     event.preventDefault()
-    if (!onLogin(username, password)) setError('Usuario o contraseña incorrectos.')
+    if (!(await onLogin(username, password))) setError('Usuario o contraseña incorrectos.')
   }
-  return <main className="login-shell"><div className="aurora aurora-one" /><section className="login-card"><div className="login-mark">◆</div><p className="eyebrow">NEXO DRIVE · OPERACIONES</p><h1>Inicia <span>tu turno.</span></h1><p>Accede a la central de transporte, taller y lavado.</p><form onSubmit={submit}><label>Usuario<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" /></label><label>Contraseña<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></label>{error && <small className="error">{error}</small>}<button className="primary glow" type="submit">Ingresar a la central →</button></form><div className="demo-account">Cuenta inicial: <b>admin</b> · clave: <b>admin123</b></div></section></main>
+  return <main className="login-shell"><div className="aurora aurora-one" /><section className="login-card"><div className="login-mark">◆</div><p className="eyebrow">NEXO DRIVE · OPERACIONES</p><h1>Inicia <span>tu turno.</span></h1><p>Accede a la central de transporte, taller y lavado.</p><form onSubmit={submit}><label>Usuario<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" /></label><label>Contraseña<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></label>{(error || apiError) && <small className="error">{error || apiError}</small>}<button className="primary glow" type="submit">Ingresar a la central →</button></form><div className="demo-account">Cuenta inicial: <b>admin</b> · clave: <b>admin123</b></div></section></main>
 }
 
 function Dashboard({ workers, session, onNewWorker, onViewWorkers }) {
@@ -167,6 +166,14 @@ function Workers({ workers, isAdmin, onNewWorker, onChangeRole }) {
     <section className="panel directory"><div className="panel-heading"><h2>Personal registrado <b>{workers.length}</b></h2><div className="search">⌕ <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar por nombre o documento" /></div></div>
       {workers.length ? <div className="table">{visibleWorkers.length ? visibleWorkers.map((worker) => <div className="worker-row" key={worker.id}><span className="worker-orb">{worker.firstName[0]}{worker.lastName[0]}</span><div><strong>{worker.firstName} {worker.lastName}</strong><small>{worker.position || 'Sin cargo'} · {worker.department || 'General'}</small></div><span className="chip">◈ Rostro verificado</span><span>{worker.schedule}</span>{isAdmin ? <label className="role-control">Rol<select value={worker.role || 'TRABAJADOR'} onChange={(event) => onChangeRole(worker.id, event.target.value)}><option value="TRABAJADOR">Trabajador</option><option value="ADMIN">Administrador</option></select></label> : <span>{worker.role === 'ADMIN' ? 'Administrador' : 'Trabajador'}</span>}</div>) : <p className="no-results">No encontramos coincidencias para esa búsqueda.</p>}</div> : <EmptyState onNewWorker={onNewWorker} />}
     </section></>
+}
+
+function Attendance({ session, onClock }) {
+  const [record, setRecord] = useState(null)
+  const [error, setError] = useState('')
+  async function register() { try { setError(''); setRecord(await onClock()) } catch (requestError) { setError(requestError.message) } }
+  if (session.role === 'ADMIN') return <Placeholder icon="◷" title="Turnos en vivo" detail="El administrador supervisa las marcaciones desde este módulo. Inicia sesión como trabajador para registrar una entrada o salida." action="Ir a la central" onAction={() => window.location.hash = 'inicio'} />
+  return <section className="placeholder"><div className="scanner"><span>◷</span></div><p className="eyebrow">REGISTRO DE TURNO</p><h1>{record ? `${record.record_type} registrada` : 'Marca tu asistencia.'}</h1><p>{record ? `Marcación realizada a las ${new Date(record.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` : 'El sistema alternará automáticamente entre entrada y salida.'}</p>{error && <p className="error">{error}</p>}<button className="primary glow" onClick={register}>{record?.record_type === 'ENTRADA' ? 'Registrar salida' : 'Registrar entrada'}</button></section>
 }
 
 function Placeholder({ icon, title, detail, action, onAction }) { return <section className="placeholder"><div className="scanner"><span>{icon}</span></div><p className="eyebrow">MÓDULO EN PREPARACIÓN</p><h1>{title}</h1><p>{detail}</p><button className="secondary" onClick={onAction}>{action}</button></section> }
