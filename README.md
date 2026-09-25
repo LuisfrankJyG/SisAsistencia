@@ -1,159 +1,168 @@
 # NEXO DRIVE · Control de asistencia
 
-Prototipo web para gestionar asistencia del personal de una operación de transporte, taller y autolavado. Incluye perfiles de administrador y trabajador, registro de personal, captura desde cámara y un servicio Python preparado para generar vectores faciales.
+Aplicación web para administrar personal y asistencia de una operación de transporte, taller y autolavado. Interfaz React/JavaScript, API Node.js/Express, PostgreSQL con pgvector y servicio facial Python.
 
-> Estado: prototipo funcional. Las cuentas y el directorio se guardan temporalmente en el navegador (`localStorage`). La siguiente etapa es conectarlos a PostgreSQL y autenticación JWT.
+## Cambios de v0.6
 
-## Características
-
-- Inicio y cierre de sesión.
-- Perfiles `Administrador` y `Trabajador`.
-- Registro guiado de trabajadores: datos, acceso, horario y muestra facial.
-- Cambio de roles desde el directorio de personal.
-- Panel de operación para turnos, transporte, taller y lavado.
-- PostgreSQL 16 con extensión `pgvector`.
-- Servicio Python/FastAPI para extraer y comparar embeddings faciales de 512 dimensiones.
-- Inicio de sesión por contraseña o rostro (el facial requiere documento y plantilla inscrita).
-
-## Tecnologías
-
-| Componente | Tecnología |
-| --- | --- |
-| Interfaz | React 19 + Vite + JavaScript |
-| API principal | Node.js + Express |
-| Base de datos | PostgreSQL 16 + pgvector |
-| Servicio facial | Python 3.12 + FastAPI + InsightFace |
-| Contenedores | Docker Compose |
+- **Turnos en vivo:** administradores consultan marcaciones por día; trabajadores registran entrada/salida y consultan su historial.
+- **Flota y operación:** registrar vehículos, cambiar estado (disponible, en servicio o mantenimiento) y retirar unidades.
+- **Reportes:** filtrar asistencia por fechas, ver tardanza y tiempo trabajado, y exportar CSV.
+- **Configuración:** persistir nombre de operación, horario predeterminado, tolerancia de tardanza y sedes.
+- La API crea las tablas de configuración y flota al iniciar, incluso si se actualiza una base ya existente.
 
 ## Requisitos
 
-- [Node.js 20 o superior](https://nodejs.org/)
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/), iniciado y con el motor activo.
-- Git (solo si clonas el repositorio).
+- Windows 10/11, macOS o Linux.
+- Node.js 20.19 o superior y npm.
+- Docker Desktop con Docker Compose, abierto y en ejecución.
+- Git para clonar el proyecto.
+- Cámara y permiso del navegador para enrolamiento e inicio facial.
 
-No es necesario instalar Python localmente si se usa Docker.
+No hace falta instalar PostgreSQL ni Python localmente: Docker ejecuta PostgreSQL con pgvector y el servicio facial.
 
-## Instalación rápida
+## Instalación en Windows (PowerShell)
+
+```powershell
+git clone https://github.com/LuisfrankJyG/SisAsistencia.git
+cd SisAsistencia
+Copy-Item api/.env.example api/.env
+```
+
+Edita `api/.env` y cambia `JWT_SECRET` por una cadena larga y única. Inicia la base de datos y el servicio facial:
+
+```powershell
+docker compose up -d --build
+docker compose ps
+```
+
+Instala dependencias. Usa `npm.cmd` si PowerShell bloquea el script `npm.ps1`:
+
+```powershell
+cd api
+npm.cmd install
+cd ../web
+npm.cmd install
+cd ..
+```
+
+## Instalación en macOS/Linux
 
 ```bash
 git clone https://github.com/LuisfrankJyG/SisAsistencia.git
 cd SisAsistencia
-docker compose up -d --build
-```
-
-Instala las dependencias de las dos aplicaciones:
-
-```bash
-cd api
-npm install
-```
-
-En otra terminal:
-
-```bash
-cd web
-npm install
-```
-
-Crea la configuración local de la API:
-
-```bash
-copy api\.env.example api\.env
-```
-
-En macOS/Linux usa:
-
-```bash
 cp api/.env.example api/.env
 ```
 
-## Ejecutar el proyecto
-
-Abre tres terminales desde la raíz del proyecto.
-
-**1. Infraestructura y servicio facial**
+Edita `api/.env`, define un `JWT_SECRET` largo y único, e instala los servicios:
 
 ```bash
 docker compose up -d --build
+cd api && npm install
+cd ../web && npm install
+cd ..
 ```
 
-**2. API Node.js**
+## Iniciar el sistema
+
+Deja Docker ejecutándose y abre dos terminales en la carpeta del repositorio.
+
+Terminal 1 — API (PowerShell: `npm.cmd run dev`):
 
 ```bash
 cd api
 npm run dev
 ```
 
-**3. Interfaz React**
+Terminal 2 — interfaz (PowerShell: `npm.cmd run dev`):
 
 ```bash
 cd web
 npm run dev
 ```
 
-| Servicio | Dirección |
+Abre <http://localhost:5173>. La API y PostgreSQL deben estar activos antes de registrar personal. El primer arranque puede tardar mientras Docker descarga las imágenes y modelos faciales.
+
+| Servicio | Dirección local |
 | --- | --- |
-| Panel web | http://localhost:5173 |
-| API Node.js | http://localhost:3000/api/health |
-| Servicio facial Python | http://localhost:8000/health |
+| Aplicación web | <http://localhost:5173> |
+| Estado API/base | <http://localhost:3000/api/health> |
+| Estado facial | <http://localhost:8000/health> |
 | PostgreSQL | `localhost:5432` |
 
-## Cuenta inicial
+## Primer acceso
 
-| Usuario | Contraseña | Rol |
+La API crea la cuenta inicial si no existe:
+
+| Usuario | Contraseña inicial | Rol |
 | --- | --- | --- |
 | `admin` | `admin123` | Administrador |
 
-Después de iniciar sesión, el administrador puede crear trabajadores, indicar un usuario y contraseña temporal, y cambiar roles en el módulo **Equipo**. Para probar otro perfil, cierra sesión desde el menú del perfil e ingresa con las credenciales del trabajador creado.
+`INITIAL_ADMIN_PASSWORD` en `api/.env` solo se aplica al crear la cuenta por primera vez. Cambia la clave inicial antes de exponer el sistema. Las sesiones caducan a las 8 horas.
 
-## Servicio de reconocimiento facial
+Desde **Equipo**, el administrador puede crear trabajadores con documento, credenciales, horario y muestra facial. El registro de plantilla facial exige consentimiento biométrico. El rol del personal puede cambiarse desde el directorio.
 
-El directorio [`face-service`](./face-service) contiene un servicio Python independiente. No persiste imágenes ni vectores: la API Node.js será responsable de guardar solo el embedding validado en PostgreSQL/pgvector.
+## Módulos
 
-| Ruta | Método | Propósito |
-| --- | --- | --- |
-| `/health` | GET | Comprueba que el servicio esté activo. |
-| `/embedding` | POST | Recibe una imagen base64 y devuelve un embedding de 512 dimensiones. |
-| `/compare` | POST | Compara dos embeddings mediante similitud coseno. |
+- **Turnos:** marcaciones por fecha para administrador; historial y entrada/salida propios para trabajador.
+- **Flota y operación:** alta de unidad por placa, modelo/nombre y tipo; actualización de estado o retiro; consulta de asistencia por rango de fechas y exportación CSV.
+- **Configuración:** nombre de operación, horario predeterminado, minutos de tolerancia y sedes. El horario predeterminado se propone para nuevos trabajadores; cada ficha conserva su horario individual.
+- **Equipo:** registro de personal y administración de roles.
 
-Ejemplo de comprobación:
+## Datos y persistencia
+
+PostgreSQL guarda personal, usuarios, marcaciones, plantillas faciales, configuración y vehículos. El esquema está en [`database/init.sql`](database/init.sql). Docker ejecuta ese archivo al crear por primera vez el volumen; la API también crea de forma segura las tablas añadidas (`app_settings` y `fleet_vehicles`) al arrancar, sin borrar una base anterior.
+
+Los datos se conservan en el volumen `postgres_data`. Para detener servicios sin borrar datos:
 
 ```bash
-curl http://localhost:8000/health
+docker compose down
 ```
 
-## Base de datos
+Para iniciarlos nuevamente:
 
-El archivo [`database/init.sql`](./database/init.sql) crea estas tablas al iniciar un volumen nuevo de PostgreSQL:
+```bash
+docker compose up -d
+```
 
-- `workers`
-- `users`
-- `facial_templates`
-- `attendance_records`
-
-Para reiniciar por completo la base local —esto elimina los datos de Docker—:
+**Advertencia:** este comando borra permanentemente la base de datos local y todo su contenido:
 
 ```bash
 docker compose down -v
-docker compose up -d --build
 ```
 
-## Seguridad y datos biométricos
+## Reconocimiento facial
 
-- Solicita consentimiento explícito antes del registro facial.
-- Guarda embeddings, no fotografías, como mecanismo principal de identificación.
-- Añade detección de prueba de vida antes de usar el reconocimiento facial en producción.
-- Los controles actuales de iluminación, nitidez y tamaño del rostro mejoran la calidad de captura, pero **no son prueba de vida** y no bloquean una suplantación con foto o vídeo.
-- Ofrece un método alternativo de asistencia para incidencias o personas que no otorguen consentimiento.
-- Cambia `JWT_SECRET` y `POSTGRES_PASSWORD` antes de desplegar fuera del entorno local.
+El servicio independiente en [`face-service`](face-service) genera vectores de 512 dimensiones desde imágenes y no conserva la fotografía. Node.js compara los vectores con la plantilla consentida en pgvector.
 
-## Próximos pasos
+| Ruta | Método | Propósito |
+| --- | --- | --- |
+| `/health` | GET | Estado del servicio. |
+| `/embedding` | POST | Generar embedding de 512 dimensiones. |
+| `/compare` | POST | Comparar vectores por similitud coseno. |
 
-1. Conectar React con la API Node.js y PostgreSQL.
-2. Cifrar contraseñas con `bcrypt` y emitir JWT.
-3. Guardar embeddings generados por Python en `pgvector`.
-4. Implementar asistencia de entrada/salida, tardanzas, faltas y horas trabajadas.
-5. Añadir prueba de vida y controles de auditoría.
+## Seguridad y límites conocidos
+
+- Cambia `JWT_SECRET`, la contraseña de PostgreSQL y la clave inicial antes de cualquier despliegue público.
+- Solicita consentimiento informado para el tratamiento biométrico y cumple la normativa aplicable.
+- No hay prueba de vida: la validación facial no impide por sí sola suplantación con foto o vídeo.
+- Los reportes muestran jornadas con marcaciones; no deducen faltas en días sin registros porque aún no existe calendario laboral por persona.
+- La flota registra unidades y estado; todavía no incluye GPS, asignación de conductores ni historial de mantenimiento.
+- No expongas PostgreSQL ni el servicio facial directamente a Internet.
+
+## Comprobaciones de desarrollo
+
+Desde `web/`:
+
+```bash
+npm run build
+npm run lint
+```
+
+Desde la raíz:
+
+```bash
+node --check api/src/server.js
+```
 
 ## Licencia
 

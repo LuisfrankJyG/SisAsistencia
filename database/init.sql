@@ -49,5 +49,30 @@ CREATE TABLE attendance_records (
   notes TEXT
 );
 
+CREATE TABLE IF NOT EXISTS app_settings (
+  id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id),
+  company_name VARCHAR(160) NOT NULL DEFAULT 'NEXO DRIVE',
+  default_start TIME NOT NULL DEFAULT '08:00',
+  default_end TIME NOT NULL DEFAULT '17:00',
+  grace_minutes INTEGER NOT NULL DEFAULT 10 CHECK (grace_minutes BETWEEN 0 AND 180),
+  locations JSONB NOT NULL DEFAULT '["Sede principal"]'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO app_settings(id) VALUES(TRUE) ON CONFLICT(id) DO NOTHING;
+
+CREATE TABLE IF NOT EXISTS fleet_vehicles (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  plate VARCHAR(20) NOT NULL UNIQUE,
+  label VARCHAR(120) NOT NULL,
+  vehicle_type VARCHAR(60) NOT NULL DEFAULT 'Unidad',
+  status VARCHAR(20) NOT NULL DEFAULT 'DISPONIBLE'
+    CHECK (status IN ('DISPONIBLE','EN_SERVICIO','MANTENIMIENTO')),
+  notes TEXT,
+  active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE INDEX attendance_worker_date_idx ON attendance_records (worker_id, recorded_at DESC);
 CREATE INDEX facial_templates_embedding_idx ON facial_templates USING hnsw (embedding vector_cosine_ops);

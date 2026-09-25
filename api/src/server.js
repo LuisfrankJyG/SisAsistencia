@@ -33,6 +33,19 @@ const sign = (user) => jwt.sign({ sub: user.id, role: user.role }, secret, { exp
 const mapWorker = (row) => ({ id: row.id, firstName: row.first_name, lastName: row.last_name, document: row.document_number, username: row.username, role: row.role, position: row.position, department: row.department, scheduleStart: row.scheduled_start, scheduleEnd: row.scheduled_end, active: row.active, faceReady: Boolean(row.face_ready), createdAt: row.created_at })
 
 async function bootstrapAdmin() {
+  await pool.query(`CREATE TABLE IF NOT EXISTS app_settings (
+    id BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (id), company_name VARCHAR(160) NOT NULL DEFAULT 'NEXO DRIVE',
+    default_start TIME NOT NULL DEFAULT '08:00', default_end TIME NOT NULL DEFAULT '17:00',
+    grace_minutes INTEGER NOT NULL DEFAULT 10 CHECK (grace_minutes BETWEEN 0 AND 180),
+    locations JSONB NOT NULL DEFAULT '["Sede principal"]'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`)
+  await pool.query('INSERT INTO app_settings(id) VALUES(TRUE) ON CONFLICT(id) DO NOTHING')
+  await pool.query(`CREATE TABLE IF NOT EXISTS fleet_vehicles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(), plate VARCHAR(20) NOT NULL UNIQUE,
+    label VARCHAR(120) NOT NULL, vehicle_type VARCHAR(60) NOT NULL DEFAULT 'Unidad',
+    status VARCHAR(20) NOT NULL DEFAULT 'DISPONIBLE' CHECK (status IN ('DISPONIBLE','EN_SERVICIO','MANTENIMIENTO')),
+    notes TEXT, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`)
   const exists = await pool.query('SELECT id FROM users WHERE username=$1', ['admin'])
   if (exists.rowCount) return
   const hash = await bcrypt.hash(process.env.INITIAL_ADMIN_PASSWORD || 'admin123', 12)
@@ -102,6 +115,77 @@ app.post('/api/workers/:id/facial-template', authenticate, adminOnly, async (req
 })
 app.patch('/api/workers/:id/role', authenticate, adminOnly, async (req, res) => { const role = z.enum(['ADMIN','TRABAJADOR']).safeParse(req.body.role); if (!role.success) return res.status(400).json({ message: 'Rol inválido.' }); const result = await pool.query('UPDATE users SET role=$1 WHERE worker_id=$2 RETURNING role', [role.data,req.params.id]); result.rowCount ? res.json(result.rows[0]) : res.status(404).json({ message: 'Trabajador no encontrado.' }) })
 app.post('/api/attendance/clock', authenticate, async (req, res) => { const { rows: users } = await pool.query('SELECT worker_id FROM users WHERE id=$1', [req.auth.sub]); if (!users[0]?.worker_id) return res.status(400).json({ message: 'La cuenta administradora no registra asistencia.' }); const { rows: previous } = await pool.query('SELECT record_type FROM attendance_records WHERE worker_id=$1 ORDER BY recorded_at DESC LIMIT 1', [users[0].worker_id]); const type = previous[0]?.record_type === 'ENTRADA' ? 'SALIDA' : 'ENTRADA'; const result = await pool.query(`INSERT INTO attendance_records(worker_id,record_type,method) VALUES($1,$2,'MANUAL') RETURNING id,record_type,recorded_at`, [users[0].worker_id,type]); res.status(201).json(result.rows[0]) })
+app.get('/api/attendance', authenticate, async (req, res) => {
+  const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).safeParse(req.query.date || new Date().toISOString().slice(0, 10))
+  if (!date.success) return res.status(400).json({ message: 'Fecha inválida.' })
+  const params = [date.data]
+  let workerClause = ''
+  if (req.auth.role !== 'ADMIN') {
+    params.push(req.auth.sub)
+    workerClause = 'AND u.id=$2'
+  }
+  const { rows } = await pool.query(`SELECT a.id,a.record_type,a.recorded_at,a.method,a.verification_score,
+    w.id worker_id,w.first_name,w.last_name,w.position,w.department,u.username
+    FROM attendance_records a JOIN workers w ON w.id=a.worker_id JOIN users u ON u.worker_id=w.id
+    WHERE a.recorded_at::date=$1::date ${workerClause} ORDER BY a.recorded_at DESC`, params)
+  res.json(rows)
+})
+app.get('/api/reports/attendance', authenticate, adminOnly, async (req, res) => {
+  const today = new Date().toISOString().slice(0, 10)
+  const parsed = z.object({ from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).safeParse({ from: req.query.from || today, to: req.query.to || today })
+  if (!parsed.success || parsed.data.from > parsed.data.to) return res.status(400).json({ message: 'Indica un rango de fechas válido.' })
+  const { rows } = await pool.query(`WITH daily AS (
+    SELECT worker_id, recorded_at::date work_date,
+      min(recorded_at) FILTER (WHERE record_type='ENTRADA') first_entry,
+      max(recorded_at) FILTER (WHERE record_type='SALIDA') last_exit
+    FROM attendance_records WHERE recorded_at::date BETWEEN $1::date AND $2::date GROUP BY worker_id,recorded_at::date
+  )
+  SELECT w.id worker_id,w.document_number,w.first_name,w.last_name,w.position,w.department,w.scheduled_start,
+    d.work_date,d.first_entry,d.last_exit,
+    CASE WHEN d.first_entry IS NULL THEN NULL WHEN w.scheduled_start IS NULL THEN 0
+      ELSE GREATEST(0,FLOOR(EXTRACT(EPOCH FROM (d.first_entry::time-w.scheduled_start))/60)::int-COALESCE(s.grace_minutes,10)) END late_minutes,
+    CASE WHEN d.first_entry IS NOT NULL AND d.last_exit IS NOT NULL THEN GREATEST(0,FLOOR(EXTRACT(EPOCH FROM (d.last_exit-d.first_entry))/60)::int) ELSE 0 END worked_minutes,
+    CASE WHEN d.first_entry IS NULL THEN 'SIN ENTRADA' WHEN d.last_exit IS NULL THEN 'EN TURNO'
+      WHEN w.scheduled_start IS NOT NULL AND d.first_entry::time > w.scheduled_start + make_interval(mins => COALESCE(s.grace_minutes,10)) THEN 'TARDE' ELSE 'COMPLETO' END status
+  FROM daily d JOIN workers w ON w.id=d.worker_id LEFT JOIN app_settings s ON s.id=TRUE
+  WHERE w.active ORDER BY d.work_date DESC,w.first_name,w.last_name`, [parsed.data.from, parsed.data.to])
+  res.json(rows)
+})
+app.get('/api/settings', authenticate, adminOnly, async (_req, res) => {
+  const { rows } = await pool.query('SELECT company_name, to_char(default_start,\'HH24:MI\') default_start, to_char(default_end,\'HH24:MI\') default_end, grace_minutes, locations, updated_at FROM app_settings WHERE id=TRUE')
+  res.json(rows[0])
+})
+app.patch('/api/settings', authenticate, adminOnly, async (req, res) => {
+  const parsed = z.object({ companyName: z.string().trim().min(2).max(160), defaultStart: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), defaultEnd: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/), graceMinutes: z.number().int().min(0).max(180), locations: z.array(z.string().trim().min(2).max(120)).min(1).max(20) }).safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ message: 'Revisa nombre, horario, tolerancia y al menos una sede.' })
+  if (parsed.data.defaultStart >= parsed.data.defaultEnd) return res.status(400).json({ message: 'La hora de salida debe ser posterior a la hora de entrada.' })
+  const d = parsed.data
+  const { rows } = await pool.query(`UPDATE app_settings SET company_name=$1,default_start=$2,default_end=$3,grace_minutes=$4,locations=$5::jsonb,updated_at=now() WHERE id=TRUE
+    RETURNING company_name,to_char(default_start,'HH24:MI') default_start,to_char(default_end,'HH24:MI') default_end,grace_minutes,locations,updated_at`, [d.companyName,d.defaultStart,d.defaultEnd,d.graceMinutes,JSON.stringify(d.locations)])
+  res.json(rows[0])
+})
+app.get('/api/fleet', authenticate, adminOnly, async (_req, res) => {
+  const { rows } = await pool.query('SELECT id,plate,label,vehicle_type,status,notes,created_at,updated_at FROM fleet_vehicles WHERE active ORDER BY plate')
+  res.json(rows)
+})
+app.post('/api/fleet', authenticate, adminOnly, async (req, res) => {
+  const parsed = z.object({ plate: z.string().trim().min(3).max(20), label: z.string().trim().min(2).max(120), vehicleType: z.string().trim().min(2).max(60), notes: z.string().trim().max(500).optional().default('') }).safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ message: 'Indica placa, nombre/modelo y tipo de unidad.' })
+  try {
+    const { rows } = await pool.query('INSERT INTO fleet_vehicles(plate,label,vehicle_type,notes) VALUES($1,$2,$3,$4) RETURNING id,plate,label,vehicle_type,status,notes,created_at,updated_at', [parsed.data.plate.toUpperCase(),parsed.data.label,parsed.data.vehicleType,parsed.data.notes || null])
+    res.status(201).json(rows[0])
+  } catch (error) { res.status(error.code === '23505' ? 409 : 500).json({ message: error.code === '23505' ? 'Ya existe una unidad con esa placa.' : 'No se pudo registrar el vehículo.' }) }
+})
+app.patch('/api/fleet/:id', authenticate, adminOnly, async (req, res) => {
+  if (req.body.active === false) {
+    const result = await pool.query('UPDATE fleet_vehicles SET active=false,updated_at=now() WHERE id=$1 RETURNING id', [req.params.id])
+    return result.rowCount ? res.json({ removed: true }) : res.status(404).json({ message: 'Vehículo no encontrado.' })
+  }
+  const parsed = z.object({ status: z.enum(['DISPONIBLE','EN_SERVICIO','MANTENIMIENTO']) }).safeParse(req.body)
+  if (!parsed.success) return res.status(400).json({ message: 'Estado de flota inválido.' })
+  const { rows } = await pool.query('UPDATE fleet_vehicles SET status=$1,updated_at=now() WHERE id=$2 AND active RETURNING id,plate,label,vehicle_type,status,notes,created_at,updated_at', [parsed.data.status,req.params.id])
+  rows[0] ? res.json(rows[0]) : res.status(404).json({ message: 'Vehículo no encontrado.' })
+})
 app.get('/api/dashboard', authenticate, async (_req, res) => { const { rows } = await pool.query(`WITH today AS (SELECT * FROM attendance_records WHERE recorded_at::date=CURRENT_DATE) SELECT (SELECT count(*) FROM workers WHERE active) workers,(SELECT count(DISTINCT worker_id) FROM today WHERE record_type='ENTRADA') present,(SELECT count(*) FROM workers w WHERE w.active AND NOT EXISTS(SELECT 1 FROM today t WHERE t.worker_id=w.id AND t.record_type='ENTRADA')) absent,(SELECT count(*) FROM today) marks`); res.json(rows[0]) })
 app.use((error, _req, res, _next) => { console.error(error); res.status(500).json({ message: 'Error interno.' }) })
 bootstrapAdmin().then(() => app.listen(port, () => console.log(`API disponible en http://localhost:${port}`))).catch((error) => { console.error('No se pudo conectar a PostgreSQL:', error.message); process.exit(1) })

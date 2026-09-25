@@ -3,6 +3,7 @@ import './App.css'
 
 const initialForm = { firstName: '', lastName: '', document: '', position: '', department: '', username: '', password: '', schedule: '08:00 — 17:00' }
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api'
+const localDate = () => { const date = new Date(); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}` }
 
 function App() {
   const [view, setView] = useState('inicio')
@@ -50,13 +51,16 @@ function App() {
     }
   }
 
-  function openWorkerModal() {
+  async function openWorkerModal() {
     setForm(initialForm)
     setStep(1)
     setFaceReady(false)
     setFaceImage('')
     setCameraError('')
     setModalOpen(true)
+    if (session?.role === 'ADMIN') {
+      try { const settings = await request('/settings'); setForm((current) => ({ ...current, schedule: `${settings.default_start} — ${settings.default_end}` })) } catch { /* form retains its safe defaults */ }
+    }
   }
 
   function closeWorkerModal() {
@@ -119,9 +123,9 @@ function App() {
   const content = {
     inicio: <Dashboard workers={workers} session={session} onNewWorker={openWorkerModal} onViewWorkers={() => setView('trabajadores')} />,
     trabajadores: <Workers workers={workers} isAdmin={session.role === 'ADMIN'} onNewWorker={openWorkerModal} onChangeRole={changeRole} />,
-    marcaciones: <Attendance session={session} onClock={clock} />,
-    reportes: <Placeholder icon="▤" title="Flota y operación" detail="Consulta asistencia, tiempos de servicio y actividad por turno." action="Ver equipo" onAction={() => setView('trabajadores')} />,
-    configuracion: <Placeholder icon="⚙" title="Configuración del sistema" detail="Horarios, sedes, tolerancias y seguridad biométrica se configurarán aquí." action="Volver al resumen" onAction={() => setView('inicio')} />,
+    marcaciones: <Attendance session={session} onClock={clock} request={request} />,
+    reportes: session.role === 'ADMIN' ? <Reports request={request} /> : <Attendance session={session} onClock={clock} request={request} />,
+    configuracion: session.role === 'ADMIN' ? <Settings request={request} /> : <Dashboard workers={workers} session={session} onNewWorker={openWorkerModal} onViewWorkers={() => setView('marcaciones')} />,
   }[view]
 
   return (
@@ -133,8 +137,8 @@ function App() {
           <NavButton current={view} id="inicio" icon="◆" label="Central operativa" onClick={setView} />
           {session.role === 'ADMIN' && <NavButton current={view} id="trabajadores" icon="◉" label="Equipo" onClick={setView} />}
           <NavButton current={view} id="marcaciones" icon="◷" label="Turnos" onClick={setView} />
-          <NavButton current={view} id="reportes" icon="▤" label="Flota y reportes" onClick={setView} />
-          <NavButton current={view} id="configuracion" icon="⚙" label="Configuración" onClick={setView} />
+          {session.role === 'ADMIN' && <NavButton current={view} id="reportes" icon="▤" label="Flota y operación" onClick={setView} />}
+          {session.role === 'ADMIN' && <NavButton current={view} id="configuracion" icon="⚙" label="Configuración" onClick={setView} />}
         </nav>
         <div className="system-status"><i /> OPERACIÓN EN LÍNEA</div>
         <div className="profile-wrap"><button className="profile" onClick={() => setShowProfileMenu(!showProfileMenu)}><div className="avatar">{session.firstName.slice(0, 2).toUpperCase()}</div><span><strong>{session.firstName} {session.lastName}</strong><small>{session.role === 'ADMIN' ? 'Administrador' : 'Trabajador'}</small></span><b>⋮</b></button>{showProfileMenu && <div className="profile-menu"><button onClick={() => { setView('configuracion'); setShowProfileMenu(false) }}>Configuración</button><button onClick={() => setSession(null)}>Cerrar sesión</button></div>}</div>
@@ -193,15 +197,98 @@ function Workers({ workers, isAdmin, onNewWorker, onChangeRole }) {
     </section></>
 }
 
-function Attendance({ session, onClock }) {
+function Attendance({ session, onClock, request }) {
   const [record, setRecord] = useState(null)
   const [error, setError] = useState('')
+  const [records, setRecords] = useState([])
+  const [date, setDate] = useState(localDate)
+  const [loading, setLoading] = useState(false)
+  async function loadRecords() {
+    setLoading(true)
+    try { setRecords(await request(`/attendance?date=${date}`)); setError('') }
+    catch (requestError) { setError(requestError.message) }
+    finally { setLoading(false) }
+  }
+  useEffect(() => { loadRecords() }, [date])
   async function register() { try { setError(''); setRecord(await onClock()) } catch (requestError) { setError(requestError.message) } }
-  if (session.role === 'ADMIN') return <Placeholder icon="◷" title="Turnos en vivo" detail="El administrador supervisa las marcaciones desde este módulo. Inicia sesión como trabajador para registrar una entrada o salida." action="Ir a la central" onAction={() => window.location.hash = 'inicio'} />
-  return <section className="placeholder"><div className="scanner"><span>◷</span></div><p className="eyebrow">REGISTRO DE TURNO</p><h1>{record ? `${record.record_type} registrada` : 'Marca tu asistencia.'}</h1><p>{record ? `Marcación realizada a las ${new Date(record.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` : 'El sistema alternará automáticamente entre entrada y salida.'}</p>{error && <p className="error">{error}</p>}<button className="primary glow" onClick={register}>{record?.record_type === 'ENTRADA' ? 'Registrar salida' : 'Registrar entrada'}</button></section>
+  if (session.role === 'ADMIN') return <>
+    <header><div><p className="eyebrow">SUPERVISIÓN · MARCACIONES</p><h1>Turnos <span>en vivo.</span></h1><p className="intro">Actividad registrada del equipo por fecha.</p></div><label className="date-filter">Fecha<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label></header>
+    <section className="panel"><div className="panel-heading"><div><p className="eyebrow">REGISTRO DIARIO</p><h2>{records.length} marcaciones</h2></div><button className="secondary" onClick={loadRecords} disabled={loading}>{loading ? 'Actualizando…' : '↻ Actualizar'}</button></div>
+      {records.length ? <div className="data-table"><div className="data-row data-head"><span>Personal</span><span>Área / cargo</span><span>Movimiento</span><span>Hora</span><span>Método</span></div>{records.map((item) => <div className="data-row" key={item.id}><strong>{item.first_name} {item.last_name}</strong><span>{item.position || '—'} · {item.department || 'General'}</span><span className={`status-pill ${item.record_type === 'ENTRADA' ? 'ok' : 'neutral'}`}>{item.record_type}</span><span>{new Date(item.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span><span>{item.method === 'FACIAL' ? 'Rostro' : 'Manual'}</span></div>)}</div> : <div className="module-empty">{loading ? 'Cargando marcaciones…' : 'No hay marcaciones registradas para esta fecha.'}</div>}
+    </section>
+  </>
+  return <>
+    <header><div><p className="eyebrow">REGISTRO DE TURNO</p><h1>Mi <span>asistencia.</span></h1><p className="intro">Registra tu entrada y salida de jornada.</p></div></header>
+    <section className="panel clock-panel"><div className="scanner"><span>◷</span></div><h2>{record ? `${record.record_type} registrada` : 'Marca tu asistencia.'}</h2><p>{record ? `Marcación realizada a las ${new Date(record.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}.` : 'El sistema alternará automáticamente entre entrada y salida.'}</p>{error && <p className="error">{error}</p>}<button className="primary glow" onClick={register}>{record?.record_type === 'ENTRADA' ? 'Registrar salida' : 'Registrar entrada'}</button></section>
+    <section className="panel attendance-history"><div className="panel-heading"><div><p className="eyebrow">MIS MARCACIONES</p><h2>Hoy</h2></div><button className="secondary" onClick={loadRecords}>↻ Actualizar</button></div>{records.length ? records.map((item) => <div className="data-row" key={item.id}><strong>{item.record_type}</strong><span>{new Date(item.recorded_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span><span>{item.method === 'FACIAL' ? 'Validación facial' : 'Registro manual'}</span></div>) : <div className="module-empty">Aún no tienes marcaciones hoy.</div>}</section>
+  </>
 }
 
-function Placeholder({ icon, title, detail, action, onAction }) { return <section className="placeholder"><div className="scanner"><span>{icon}</span></div><p className="eyebrow">MÓDULO EN PREPARACIÓN</p><h1>{title}</h1><p>{detail}</p><button className="secondary" onClick={onAction}>{action}</button></section> }
+function Reports({ request }) {
+  const today = localDate()
+  const [from, setFrom] = useState(today)
+  const [to, setTo] = useState(today)
+  const [rows, setRows] = useState([])
+  const [vehicles, setVehicles] = useState([])
+  const [vehicleForm, setVehicleForm] = useState({ plate: '', label: '', vehicleType: 'Unidad', notes: '' })
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+  async function load() { setLoading(true); setError(''); try { setRows(await request(`/reports/attendance?from=${from}&to=${to}`)) } catch (e) { setError(e.message) } finally { setLoading(false) } }
+  async function loadFleet() { try { setVehicles(await request('/fleet')) } catch (e) { setError(e.message) } }
+  useEffect(() => { load(); loadFleet() }, [])
+  async function addVehicle(event) {
+    event.preventDefault(); setError('')
+    try { const vehicle = await request('/fleet', { method: 'POST', body: JSON.stringify(vehicleForm) }); setVehicles((current) => [...current, vehicle].sort((a,b) => a.plate.localeCompare(b.plate))); setVehicleForm({ plate: '', label: '', vehicleType: 'Unidad', notes: '' }) }
+    catch (e) { setError(e.message) }
+  }
+  async function updateVehicle(vehicle, changes) {
+    try {
+      const updated = await request(`/fleet/${vehicle.id}`, { method: 'PATCH', body: JSON.stringify(changes) })
+      setVehicles((current) => changes.active === false ? current.filter((item) => item.id !== vehicle.id) : current.map((item) => item.id === updated.id ? updated : item))
+    } catch (e) { setError(e.message) }
+  }
+  const late = rows.filter((row) => Number(row.late_minutes) > 0).length
+  const active = rows.filter((row) => row.status === 'EN TURNO').length
+  const minutes = rows.reduce((sum, row) => sum + Number(row.worked_minutes || 0), 0)
+  function exportCsv() {
+    const columns = ['Fecha','Documento','Trabajador','Área','Primera entrada','Última salida','Minutos tarde','Minutos trabajados','Estado']
+    const values = rows.map((r) => [r.work_date, r.document_number, `${r.first_name} ${r.last_name}`, r.department || '', r.first_entry ? new Date(r.first_entry).toLocaleTimeString() : '', r.last_exit ? new Date(r.last_exit).toLocaleTimeString() : '', r.late_minutes ?? '', r.worked_minutes, r.status])
+    const csv = [columns, ...values].map((line) => line.map((v) => `"${String(v).replaceAll('"','""')}"`).join(';')).join('\r\n')
+    const link = document.createElement('a'); link.href = URL.createObjectURL(new Blob(['\ufeff', csv], { type: 'text/csv;charset=utf-8' })); link.download = `nexo-asistencia-${from}-${to}.csv`; link.click(); URL.revokeObjectURL(link.href)
+  }
+  return <>
+    <header><div><p className="eyebrow">FLOTA · PRODUCTIVIDAD</p><h1>Flota y <span>operación.</span></h1><p className="intro">Resumen de turnos, puntualidad y horas registradas.</p></div><button className="secondary" onClick={exportCsv} disabled={!rows.length}>↓ Exportar CSV</button></header>
+    {error && <p className="error api-error">{error}</p>}
+    <section className="panel fleet-panel"><div className="panel-heading"><div><p className="eyebrow">UNIDADES · ESTADO OPERATIVO</p><h2>Flota registrada <b>{vehicles.length}</b></h2></div></div>
+      <form className="fleet-form" onSubmit={addVehicle}><label>Placa<input value={vehicleForm.plate} onChange={(e) => setVehicleForm({ ...vehicleForm, plate: e.target.value.toUpperCase() })} placeholder="ABC-123" required /></label><label>Nombre / modelo<input value={vehicleForm.label} onChange={(e) => setVehicleForm({ ...vehicleForm, label: e.target.value })} placeholder="Van Toyota Hiace" required /></label><label>Tipo<input value={vehicleForm.vehicleType} onChange={(e) => setVehicleForm({ ...vehicleForm, vehicleType: e.target.value })} placeholder="Van, bus, auto…" required /></label><button className="primary">＋ Añadir unidad</button></form>
+      {vehicles.length ? <div className="data-table"><div className="data-row fleet-row data-head"><span>Unidad</span><span>Tipo</span><span>Estado</span><span>Acciones</span></div>{vehicles.map((vehicle) => <div className="data-row fleet-row" key={vehicle.id}><strong>{vehicle.plate} · {vehicle.label}</strong><span>{vehicle.vehicle_type}</span><select aria-label={`Estado de ${vehicle.plate}`} value={vehicle.status} onChange={(e) => updateVehicle(vehicle, { status: e.target.value })}><option value="DISPONIBLE">Disponible</option><option value="EN_SERVICIO">En servicio</option><option value="MANTENIMIENTO">Mantenimiento</option></select><button className="text-button" onClick={() => updateVehicle(vehicle, { active: false })}>Retirar</button></div>)}</div> : <div className="module-empty">Aún no hay vehículos registrados. Añade las unidades de transporte o servicio.</div>}
+    </section>
+    <section className="panel filters-panel"><label>Desde<input type="date" value={from} onChange={(e) => setFrom(e.target.value)} /></label><label>Hasta<input type="date" value={to} onChange={(e) => setTo(e.target.value)} /></label><button className="primary" onClick={load} disabled={loading}>{loading ? 'Consultando…' : 'Consultar'}</button></section>
+    <section className="stats report-stats"><Stat label="Jornadas registradas" value={rows.length} trend="Días-persona con actividad" icon="◉" tone="cyan"/><Stat label="Tardanzas" value={late} trend="Sobre el horario configurado" icon="◷" tone="amber"/><Stat label="En turno" value={active} trend="Sin marcación de salida" icon="✓" tone="violet"/><Stat label="Horas completadas" value={`${Math.floor(minutes / 60)} h`} trend={`${minutes % 60} min adicionales`} icon="▤" tone="pink"/></section>
+    <section className="panel"><div className="panel-heading"><div><p className="eyebrow">DETALLE OPERATIVO</p><h2>Asistencia por trabajador</h2></div></div>{rows.length ? <div className="data-table"><div className="data-row report-row data-head"><span>Fecha</span><span>Trabajador</span><span>Entrada / salida</span><span>Tardanza</span><span>Horas</span><span>Estado</span></div>{rows.map((r) => <div className="data-row report-row" key={`${r.worker_id}-${r.work_date}`}><span>{new Date(`${r.work_date}T12:00:00`).toLocaleDateString()}</span><strong>{r.first_name} {r.last_name}</strong><span>{r.first_entry ? new Date(r.first_entry).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '—'} / {r.last_exit ? new Date(r.last_exit).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}) : '—'}</span><span>{r.late_minutes ? `${r.late_minutes} min` : '—'}</span><span>{Math.floor(r.worked_minutes/60)} h {r.worked_minutes%60} min</span><span className={`status-pill ${r.status === 'COMPLETO' ? 'ok' : 'neutral'}`}>{r.status}</span></div>)}</div> : <div className="module-empty">{loading ? 'Generando reporte…' : 'No hay registros de asistencia en ese rango.'}</div>}</section>
+    <p className="module-note">El reporte muestra jornadas con marcaciones; las faltas de días sin registros requieren definir primero el calendario laboral por trabajador.</p>
+  </>
+}
+
+function Settings({ request }) {
+  const [settings, setSettings] = useState(null)
+  const [locationsText, setLocationsText] = useState('')
+  const [notice, setNotice] = useState('')
+  const [error, setError] = useState('')
+  const [saving, setSaving] = useState(false)
+  useEffect(() => { request('/settings').then((data) => { setSettings(data); setLocationsText((data.locations || []).join('\n')) }).catch((e) => setError(e.message)) }, [])
+  function update(event) { setSettings({ ...settings, [event.target.name]: event.target.type === 'number' ? Number(event.target.value) : event.target.value }); setNotice('') }
+  async function save(event) {
+    event.preventDefault(); setSaving(true); setNotice(''); setError('')
+    try { const data = await request('/settings', { method: 'PATCH', body: JSON.stringify({ companyName: settings.company_name, defaultStart: settings.default_start, defaultEnd: settings.default_end, graceMinutes: Number(settings.grace_minutes), locations: locationsText.split('\n').map((x) => x.trim()).filter(Boolean) }) }); setSettings(data); setLocationsText(data.locations.join('\n')); setNotice('Configuración guardada correctamente.') }
+    catch (e) { setError(e.message) } finally { setSaving(false) }
+  }
+  if (!settings) return <section className="panel module-empty">{error || 'Cargando configuración…'}</section>
+  return <>
+    <header><div><p className="eyebrow">ADMINISTRACIÓN · PREFERENCIAS</p><h1>Configuración <span>del sistema.</span></h1><p className="intro">Ajusta parámetros operativos que se aplican a los reportes.</p></div></header>
+    <form className="panel settings-form" onSubmit={save}><div className="panel-heading"><div><p className="eyebrow">OPERACIÓN GENERAL</p><h2>Parámetros del servicio</h2></div></div><div className="settings-fields"><label>Nombre de la operación<input name="company_name" value={settings.company_name} onChange={update} required minLength="2" /></label><label>Inicio de jornada<input type="time" name="default_start" value={settings.default_start} onChange={update} required /></label><label>Fin de jornada<input type="time" name="default_end" value={settings.default_end} onChange={update} required /></label><label>Tolerancia para tardanza (minutos)<input type="number" name="grace_minutes" value={settings.grace_minutes} onChange={update} min="0" max="180" required /></label><label className="locations-field">Sedes (una por línea)<textarea rows="4" value={locationsText} onChange={(e) => setLocationsText(e.target.value)} placeholder="Sede principal" /></label></div><div className="settings-footer">{notice && <span className="success-message">{notice}</span>}{error && <span className="error">{error}</span>}<button className="primary glow" disabled={saving}>{saving ? 'Guardando…' : 'Guardar configuración'}</button></div><p className="module-note">Los horarios predeterminados son referencia para nuevos registros; cada trabajador conserva su horario individual.</p></form>
+  </>
+}
 
 function WorkerModal({ step, form, faceReady, saving, videoRef, cameraError, onChange, onClose, onContinue, onBack, onCamera, onFaceReady, onSave }) {
   const [consent, setConsent] = useState(false)
