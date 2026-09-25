@@ -18,7 +18,17 @@ app.use(helmet({ crossOriginResourcePolicy: false }))
 app.use(express.json({ limit: '3mb' }))
 const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, message: { message: 'Demasiados intentos. Espera 15 minutos antes de reintentar.' } })
 
-const workerSchema = z.object({ firstName: z.string().min(2), lastName: z.string().min(2), document: z.string().min(5), username: z.string().min(3), password: z.string().min(6), position: z.string().optional(), department: z.string().optional(), scheduleStart: z.string().optional(), scheduleEnd: z.string().optional() })
+const workerSchema = z.object({
+  firstName: z.string().trim().min(2, 'Escribe al menos 2 caracteres para los nombres.'),
+  lastName: z.string().trim().min(2, 'Escribe al menos 2 caracteres para los apellidos.'),
+  document: z.string().trim().min(5, 'El documento debe tener al menos 5 caracteres.'),
+  username: z.string().trim().min(3, 'El usuario debe tener al menos 3 caracteres.'),
+  password: z.string().min(6, 'La contraseña debe tener al menos 6 caracteres.'),
+  imageBase64: z.string().min(100, 'Captura el rostro antes de guardar.'),
+  consent: z.literal(true, 'Se requiere confirmar el consentimiento biométrico.'),
+  position: z.string().trim().optional(), department: z.string().trim().optional(),
+  scheduleStart: z.string().optional(), scheduleEnd: z.string().optional(),
+})
 const sign = (user) => jwt.sign({ sub: user.id, role: user.role }, secret, { expiresIn: '8h' })
 const mapWorker = (row) => ({ id: row.id, firstName: row.first_name, lastName: row.last_name, document: row.document_number, username: row.username, role: row.role, position: row.position, department: row.department, scheduleStart: row.scheduled_start, scheduleEnd: row.scheduled_end, active: row.active, faceReady: Boolean(row.face_ready), createdAt: row.created_at })
 
@@ -64,9 +74,18 @@ app.post('/api/auth/face', loginLimiter, async (req, res) => {
 })
 app.get('/api/workers', authenticate, adminOnly, async (_req, res) => { const { rows } = await pool.query(`SELECT w.*,u.username,u.role,EXISTS(SELECT 1 FROM facial_templates f WHERE f.worker_id=w.id AND f.active) face_ready FROM workers w JOIN users u ON u.worker_id=w.id ORDER BY w.created_at DESC`); res.json(rows.map(mapWorker)) })
 app.post('/api/workers', authenticate, adminOnly, async (req, res) => {
-  const parsed = workerSchema.safeParse(req.body); if (!parsed.success) return res.status(400).json({ message: 'Completa los datos obligatorios.' })
-  const d = parsed.data; const client = await pool.connect()
-  try { await client.query('BEGIN'); const worker = (await client.query(`INSERT INTO workers(document_number,first_name,last_name,position,department,scheduled_start,scheduled_end) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`, [d.document,d.firstName,d.lastName,d.position || null,d.department || null,d.scheduleStart || '08:00',d.scheduleEnd || '17:00'])).rows[0]; const user = (await client.query(`INSERT INTO users(worker_id,username,password_hash,role) VALUES($1,$2,$3,'TRABAJADOR') RETURNING username,role`, [worker.id,d.username,await bcrypt.hash(d.password,12)])).rows[0]; await client.query('COMMIT'); res.status(201).json(mapWorker({ ...worker, ...user, face_ready: false })) }
+  const parsed = workerSchema.safeParse(req.body)
+  if (!parsed.success) {
+    const fields = parsed.error.issues.map((issue) => `${issue.path.join('.')}: ${issue.message}`)
+    return res.status(400).json({ message: fields.join(' '), fields })
+  }
+  const d = parsed.data
+  let facial
+  try { facial = await faceEmbedding(d.imageBase64) }
+  catch (error) { return res.status(422).json({ message: error.message }) }
+  if (facial.dimension !== 512) return res.status(422).json({ message: 'La dimensión del vector facial no es compatible.' })
+  const vector = `[${facial.embedding.join(',')}]`; const client = await pool.connect()
+  try { await client.query('BEGIN'); const worker = (await client.query(`INSERT INTO workers(document_number,first_name,last_name,position,department,scheduled_start,scheduled_end) VALUES($1,$2,$3,$4,$5,$6,$7) RETURNING *`, [d.document,d.firstName,d.lastName,d.position || null,d.department || null,d.scheduleStart || '08:00',d.scheduleEnd || '17:00'])).rows[0]; const user = (await client.query(`INSERT INTO users(worker_id,username,password_hash,role) VALUES($1,$2,$3,'TRABAJADOR') RETURNING username,role`, [worker.id,d.username,await bcrypt.hash(d.password,12)])).rows[0]; await client.query('INSERT INTO facial_templates(worker_id,embedding,model_name,consented_at) VALUES($1,$2::vector,$3,now())', [worker.id,vector,facial.model]); await client.query('COMMIT'); res.status(201).json(mapWorker({ ...worker, ...user, face_ready: true })) }
   catch (error) { await client.query('ROLLBACK'); res.status(error.code === '23505' ? 409 : 500).json({ message: error.code === '23505' ? 'El documento o usuario ya existe.' : 'No se pudo crear el trabajador.' }) } finally { client.release() }
 })
 app.post('/api/workers/:id/facial-template', authenticate, adminOnly, async (req, res) => {

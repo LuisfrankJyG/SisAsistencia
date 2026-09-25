@@ -16,6 +16,7 @@ function App() {
   const [cameraError, setCameraError] = useState('')
   const [faceReady, setFaceReady] = useState(false)
   const [faceImage, setFaceImage] = useState('')
+  const [savingWorker, setSavingWorker] = useState(false)
   const videoRef = useRef(null)
 
   useEffect(() => {
@@ -64,7 +65,8 @@ function App() {
   }
 
   function updateForm(event) {
-    setForm({ ...form, [event.target.name]: event.target.value })
+    const { name, value } = event.target
+    setForm((current) => ({ ...current, [name]: value }))
   }
 
   function continueForm() {
@@ -72,14 +74,18 @@ function App() {
     setStep(step + 1)
   }
 
-  async function saveWorker() {
+  async function saveWorker(consent) {
     if (!faceReady) return
+    if (!form.firstName.trim() || !form.lastName.trim() || !form.document.trim() || !form.username.trim() || form.password.length < 6 || !faceImage || !consent) {
+      setCameraError('Revisa nombres, apellidos, documento, usuario, contraseña y consentimiento facial antes de guardar.')
+      return
+    }
+    setSavingWorker(true)
     try {
       const [scheduleStart, scheduleEnd] = form.schedule.split('—').map((value) => value.trim())
-      const worker = await request('/workers', { method: 'POST', body: JSON.stringify({ ...form, scheduleStart, scheduleEnd }) })
-      await request(`/workers/${worker.id}/facial-template`, { method: 'POST', body: JSON.stringify({ imageBase64: faceImage, consent: true }) })
+      const worker = await request('/workers', { method: 'POST', body: JSON.stringify({ ...form, firstName: form.firstName.trim(), lastName: form.lastName.trim(), document: form.document.trim(), username: form.username.trim(), scheduleStart, scheduleEnd, imageBase64: faceImage, consent }) })
       setWorkers([{ ...worker, faceReady: true }, ...workers]); closeWorkerModal(); setView('trabajadores')
-    } catch (error) { setCameraError(error.message) }
+    } catch (error) { setCameraError(error.message) } finally { setSavingWorker(false) }
   }
 
   function confirmFaceSample() {
@@ -134,7 +140,7 @@ function App() {
         <div className="profile-wrap"><button className="profile" onClick={() => setShowProfileMenu(!showProfileMenu)}><div className="avatar">{session.firstName.slice(0, 2).toUpperCase()}</div><span><strong>{session.firstName} {session.lastName}</strong><small>{session.role === 'ADMIN' ? 'Administrador' : 'Trabajador'}</small></span><b>⋮</b></button>{showProfileMenu && <div className="profile-menu"><button onClick={() => { setView('configuracion'); setShowProfileMenu(false) }}>Configuración</button><button onClick={() => setSession(null)}>Cerrar sesión</button></div>}</div>
       </aside>
       <section className="content">{apiError && <p className="error api-error">{apiError}</p>}{content}</section>
-      {isModalOpen && <WorkerModal step={step} form={form} faceReady={faceReady} videoRef={videoRef} cameraError={cameraError} onChange={updateForm} onClose={closeWorkerModal} onContinue={continueForm} onBack={() => setStep(step - 1)} onCamera={startCamera} onFaceReady={confirmFaceSample} onSave={saveWorker} />}
+      {isModalOpen && <WorkerModal step={step} form={form} faceReady={faceReady} saving={savingWorker} videoRef={videoRef} cameraError={cameraError} onChange={updateForm} onClose={closeWorkerModal} onContinue={continueForm} onBack={() => setStep(step - 1)} onCamera={startCamera} onFaceReady={confirmFaceSample} onSave={saveWorker} />}
     </main>
   )
 }
@@ -148,15 +154,15 @@ function Login({ onLogin, onFaceLogin, apiError }) {
   const [password, setPassword] = useState('admin123')
   const [error, setError] = useState('')
   const [faceMode, setFaceMode] = useState(false)
-  const [document, setDocument] = useState('')
+  const [documentNumber, setDocumentNumber] = useState('')
   const videoRef = useRef(null)
   async function submit(event) {
     event.preventDefault()
     if (!(await onLogin(username, password))) setError('Usuario o contraseña incorrectos.')
   }
   async function openCamera() { try { videoRef.current.srcObject = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false }) } catch { setError('No se pudo acceder a la cámara.') } }
-  async function faceSubmit() { if (!videoRef.current?.srcObject || !document) return setError('Indica tu documento y activa la cámara.'); const canvas = document.createElement('canvas'); canvas.width = videoRef.current.videoWidth; canvas.height = videoRef.current.videoHeight; canvas.getContext('2d').drawImage(videoRef.current, 0, 0); if (!(await onFaceLogin(document, canvas.toDataURL('image/jpeg', .88)))) setError('No fue posible validar tu rostro.') }
-  return <main className="login-shell"><div className="aurora aurora-one" /><section className="login-card"><div className="login-mark">◆</div><p className="eyebrow">NEXO DRIVE · OPERACIONES</p><h1>Inicia <span>tu turno.</span></h1><p>Accede a la central de transporte, taller y lavado.</p><div className="login-toggle"><button className={!faceMode ? 'active' : ''} onClick={() => setFaceMode(false)}>Contraseña</button><button className={faceMode ? 'active' : ''} onClick={() => setFaceMode(true)}>Rostro</button></div>{faceMode ? <div className="face-login"><label>Documento<input value={document} onChange={(event) => setDocument(event.target.value)} placeholder="DNI o código" /></label><div className="login-camera"><video ref={videoRef} autoPlay muted playsInline /><span>Un solo rostro dentro del marco</span></div><button className="ghost" onClick={openCamera}>Activar cámara</button><button className="primary glow" onClick={faceSubmit}>Validar identidad facial</button></div> : <form onSubmit={submit}><label>Usuario<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" /></label><label>Contraseña<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></label><button className="primary glow" type="submit">Ingresar a la central →</button></form>}{(error || apiError) && <small className="error">{error || apiError}</small>}<div className="demo-account">Cuenta inicial: <b>admin</b> · clave: <b>admin123</b></div></section></main>
+  async function faceSubmit() { if (!videoRef.current?.srcObject || !documentNumber.trim()) return setError('Indica tu documento y activa la cámara.'); const canvas = window.document.createElement('canvas'); canvas.width = videoRef.current.videoWidth; canvas.height = videoRef.current.videoHeight; canvas.getContext('2d').drawImage(videoRef.current, 0, 0); if (!(await onFaceLogin(documentNumber.trim(), canvas.toDataURL('image/jpeg', .88)))) setError('No fue posible validar tu rostro.') }
+  return <main className="login-shell"><div className="aurora aurora-one" /><section className="login-card"><div className="login-mark">◆</div><p className="eyebrow">NEXO DRIVE · OPERACIONES</p><h1>Inicia <span>tu turno.</span></h1><p>Accede a la central de transporte, taller y lavado.</p><div className="login-toggle"><button className={!faceMode ? 'active' : ''} onClick={() => setFaceMode(false)}>Contraseña</button><button className={faceMode ? 'active' : ''} onClick={() => setFaceMode(true)}>Rostro</button></div>{faceMode ? <div className="face-login"><label>Documento<input value={documentNumber} onChange={(event) => setDocumentNumber(event.target.value)} placeholder="DNI o código" /></label><div className="login-camera"><video ref={videoRef} autoPlay muted playsInline /><span>Un solo rostro dentro del marco</span></div><button className="ghost" onClick={openCamera}>Activar cámara</button><button className="primary glow" onClick={faceSubmit}>Validar identidad facial</button></div> : <form onSubmit={submit}><label>Usuario<input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" /></label><label>Contraseña<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" /></label><button className="primary glow" type="submit">Ingresar a la central →</button></form>}{(error || apiError) && <small className="error">{error || apiError}</small>}<div className="demo-account">Cuenta inicial: <b>admin</b> · clave: <b>admin123</b></div></section></main>
 }
 
 function Dashboard({ workers, session, onNewWorker, onViewWorkers }) {
@@ -197,12 +203,12 @@ function Attendance({ session, onClock }) {
 
 function Placeholder({ icon, title, detail, action, onAction }) { return <section className="placeholder"><div className="scanner"><span>{icon}</span></div><p className="eyebrow">MÓDULO EN PREPARACIÓN</p><h1>{title}</h1><p>{detail}</p><button className="secondary" onClick={onAction}>{action}</button></section> }
 
-function WorkerModal({ step, form, faceReady, videoRef, cameraError, onChange, onClose, onContinue, onBack, onCamera, onFaceReady, onSave }) {
+function WorkerModal({ step, form, faceReady, saving, videoRef, cameraError, onChange, onClose, onContinue, onBack, onCamera, onFaceReady, onSave }) {
   const [consent, setConsent] = useState(false)
   return <div className="modal-backdrop" role="dialog" aria-modal="true"><section className="modal"><button className="close" onClick={onClose}>×</button><p className="eyebrow">NUEVA IDENTIDAD · PASO {step}/3</p><div className="steps"><i className={step >= 1 ? 'done' : ''} /><i className={step >= 2 ? 'done' : ''} /><i className={step >= 3 ? 'done' : ''} /></div>
     {step === 1 && <><h2>Datos del trabajador</h2><p>La información base de su identidad laboral.</p><div className="fields"><label>Nombres<input name="firstName" value={form.firstName} onChange={onChange} placeholder="Ej. Andrea" /></label><label>Apellidos<input name="lastName" value={form.lastName} onChange={onChange} placeholder="Ej. Rojas" /></label><label>Documento<input name="document" value={form.document} onChange={onChange} placeholder="DNI o código interno" /></label><label>Cargo<input name="position" value={form.position} onChange={onChange} placeholder="Ej. Analista" /></label><label>Área<input name="department" value={form.department} onChange={onChange} placeholder="Ej. Operaciones" /></label></div><button className="primary modal-action" disabled={!form.firstName || !form.lastName || !form.document} onClick={onContinue}>Continuar →</button></>}
     {step === 2 && <><h2>Acceso y horario</h2><p>Define cómo se conectará a la plataforma.</p><div className="fields"><label>Usuario<input name="username" value={form.username} onChange={onChange} placeholder="usuario.apellido" required /></label><label>Contraseña temporal<input name="password" type="password" value={form.password} onChange={onChange} placeholder="Mínimo 6 caracteres" required /></label><label>Horario<input name="schedule" value={form.schedule} onChange={onChange} /></label></div><div className="notice">◈ El rol inicial será <strong>Trabajador</strong>. Un administrador podrá modificarlo después.</div><div className="actions"><button className="ghost" onClick={onBack}>← Atrás</button><button className="primary" disabled={!form.username || form.password.length < 6} onClick={onContinue}>Continuar →</button></div></>}
-    {step === 3 && <><h2>Registro facial</h2><p>La cámara toma una muestra que el servicio Python transforma en un vector de 512 valores.</p><div className={`camera ${faceReady ? 'face-ready' : ''}`}><video ref={videoRef} autoPlay muted playsInline /><div className="camera-frame" /><span>{faceReady ? '◈ Muestra capturada' : 'Alinea un solo rostro al marco'}</span></div>{cameraError && <p className="error">{cameraError}</p>}<label className="consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} /> Confirmo que el trabajador autorizó el tratamiento de su plantilla biométrica para control de asistencia.</label><div className="notice">La foto se usa únicamente para generar el embedding; no se almacena como identificador principal. Antes de producción se debe añadir prueba de vida.</div><div className="actions"><button className="ghost" onClick={onBack}>← Atrás</button>{!faceReady ? <><button className="ghost" onClick={onCamera}>Activar cámara</button><button className="primary" disabled={!consent} onClick={onFaceReady}>Capturar muestra</button></> : <button className="primary" onClick={onSave}>Finalizar registro ✓</button>}</div></>}
+    {step === 3 && <><h2>Registro facial</h2><p>La cámara toma una muestra que el servicio Python transforma en un vector de 512 valores.</p><div className={`camera ${faceReady ? 'face-ready' : ''}`}><video ref={videoRef} autoPlay muted playsInline /><div className="camera-frame" /><span>{faceReady ? '◈ Muestra capturada' : 'Alinea un solo rostro al marco'}</span></div>{cameraError && <p className="error">{cameraError}</p>}<label className="consent"><input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} /> Confirmo que el trabajador autorizó el tratamiento de su plantilla biométrica para control de asistencia.</label><div className="notice">La foto se usa únicamente para generar el embedding; no se almacena como identificador principal. Antes de producción se debe añadir prueba de vida.</div><div className="actions"><button className="ghost" onClick={onBack}>← Atrás</button>{!faceReady ? <><button className="ghost" onClick={onCamera}>Activar cámara</button><button className="primary" disabled={!consent} onClick={onFaceReady}>Capturar muestra</button></> : <button className="primary" disabled={!consent || saving} onClick={() => onSave(consent)}>{saving ? 'Guardando…' : 'Finalizar registro ✓'}</button>}</div></>}
   </section></div>
 }
 
