@@ -2,7 +2,9 @@ require('dotenv/config')
 const bcrypt = require('bcryptjs')
 const cors = require('cors')
 const express = require('express')
+const helmet = require('helmet')
 const jwt = require('jsonwebtoken')
+const rateLimit = require('express-rate-limit')
 const { Pool } = require('pg')
 const { z } = require('zod')
 
@@ -12,7 +14,9 @@ const secret = process.env.JWT_SECRET || 'solo-para-desarrollo-cambiar-en-produc
 const pool = new Pool({ connectionString: process.env.DATABASE_URL })
 const faceServiceUrl = process.env.FACE_SERVICE_URL || 'http://localhost:8000'
 app.use(cors({ origin: process.env.CORS_ORIGIN || 'http://localhost:5173' }))
+app.use(helmet({ crossOriginResourcePolicy: false }))
 app.use(express.json({ limit: '3mb' }))
+const loginLimiter = rateLimit({ windowMs: 15 * 60 * 1000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, message: { message: 'Demasiados intentos. Espera 15 minutos antes de reintentar.' } })
 
 const workerSchema = z.object({ firstName: z.string().min(2), lastName: z.string().min(2), document: z.string().min(5), username: z.string().min(3), password: z.string().min(6), position: z.string().optional(), department: z.string().optional(), scheduleStart: z.string().optional(), scheduleEnd: z.string().optional() })
 const sign = (user) => jwt.sign({ sub: user.id, role: user.role }, secret, { expiresIn: '8h' })
@@ -36,7 +40,7 @@ function authenticate(req, res, next) { const token = req.headers.authorization?
 function adminOnly(req, res, next) { return req.auth.role === 'ADMIN' ? next() : res.status(403).json({ message: 'Solo administradores.' }) }
 
 app.get('/api/health', async (_req, res) => { try { await pool.query('SELECT 1'); res.json({ status: 'ok', database: 'connected' }) } catch { res.status(503).json({ status: 'error', database: 'unavailable' }) } })
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', loginLimiter, async (req, res) => {
   const input = z.object({ username: z.string(), password: z.string() }).safeParse(req.body)
   if (!input.success) return res.status(400).json({ message: 'Credenciales inválidas.' })
   const { rows } = await pool.query('SELECT u.*,w.first_name,w.last_name FROM users u LEFT JOIN workers w ON w.id=u.worker_id WHERE u.username=$1', [input.data.username])
@@ -44,7 +48,7 @@ app.post('/api/auth/login', async (req, res) => {
   if (!user || !user.active || !(await bcrypt.compare(input.data.password, user.password_hash))) return res.status(401).json({ message: 'Usuario o contraseña incorrectos.' })
   res.json(workerSession(user))
 })
-app.post('/api/auth/face', async (req, res) => {
+app.post('/api/auth/face', loginLimiter, async (req, res) => {
   const input = z.object({ document: z.string().min(5), imageBase64: z.string().min(100) }).safeParse(req.body)
   if (!input.success) return res.status(400).json({ message: 'Documento e imagen son obligatorios.' })
   try {
