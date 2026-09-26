@@ -55,6 +55,9 @@ CREATE TABLE IF NOT EXISTS app_settings (
   default_start TIME NOT NULL DEFAULT '08:00',
   default_end TIME NOT NULL DEFAULT '17:00',
   grace_minutes INTEGER NOT NULL DEFAULT 10 CHECK (grace_minutes BETWEEN 0 AND 180),
+  theme VARCHAR(10) NOT NULL DEFAULT 'dark' CHECK (theme IN ('dark','light')),
+  time_zone VARCHAR(64) NOT NULL DEFAULT 'America/Lima',
+  appearance JSONB NOT NULL DEFAULT '{"accentColor":"#0A84FF","backgroundImage":null}'::jsonb,
   locations JSONB NOT NULL DEFAULT '["Sede principal"]'::jsonb,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

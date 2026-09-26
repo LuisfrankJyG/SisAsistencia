@@ -2,13 +2,22 @@
 
 Aplicación web para administrar personal y asistencia de una operación de transporte, taller y autolavado. Interfaz React/JavaScript, API Node.js/Express, PostgreSQL con pgvector y servicio facial Python.
 
-## Cambios de v0.6
+## Versión 1.0 · Hecho por Belen Macalupu
 
-- **Turnos en vivo:** administradores consultan marcaciones por día; trabajadores registran entrada/salida y consultan su historial.
+- **Turnos en vivo:** panel de administración que actualiza marcaciones cada 30 segundos; el personal registra entrada/salida, consulta días anteriores y ve el tiempo trabajado en la jornada abierta.
 - **Flota y operación:** registrar vehículos, cambiar estado (disponible, en servicio o mantenimiento) y retirar unidades.
 - **Reportes:** filtrar asistencia por fechas, ver tardanza y tiempo trabajado, y exportar CSV.
-- **Configuración:** persistir nombre de operación, horario predeterminado, tolerancia de tardanza y sedes.
+- **Configuración:** nombre de operación, horario, tolerancia, sedes, zona horaria, color principal, tema y fondo propio compartidos entre cuentas.
 - La API crea las tablas de configuración y flota al iniciar, incluso si se actualiza una base ya existente.
+
+## Mejoras de apariencia y privacidad
+
+- Interfaz renovada con tipografía nativa del sistema, superficies limpias y una paleta azul/neutra; funciona en tema oscuro y claro.
+- El tema elegido por el administrador se persiste en la base de datos y se aplica a todas las cuentas.
+- El administrador puede cambiar el nombre visible, seleccionar una zona horaria, elegir un color de acento y subir un fondo personalizado. Las imágenes compatibles se convierten a JPEG, se reducen a un máximo de 1600 × 1200 y se limitan antes de guardarse.
+- La asistencia y los reportes agrupan las marcaciones en la zona horaria configurada; las entradas/salidas se serializan por cuenta y se rechaza una doble marcación inmediata.
+- La cámara se apaga inmediatamente tras capturar la muestra o completar el acceso facial, y también al cerrar el registro, cambiar al acceso por contraseña, ocultar la pestaña o salir de la pantalla.
+- Al detener la cámara se cierran todas las pistas del flujo multimedia y se desconecta el vídeo. El permiso recordado por el navegador no se elimina: el sitio lo puede volver a solicitar en la próxima captura.
 
 ## Correcciones de esta revisión
 
@@ -112,9 +121,10 @@ Desde **Equipo**, el administrador puede crear trabajadores con documento, crede
 
 ## Módulos
 
-- **Turnos:** marcaciones por fecha para administrador; historial y entrada/salida propios para trabajador.
+- **Turnos:** marcaciones por fecha para administrador con actualización cada 30 segundos; historial filtrable, entrada/salida y contador de horas de la jornada propia para el trabajador.
 - **Flota y operación:** alta de unidad por placa, modelo/nombre y tipo; actualización de estado o retiro; consulta de asistencia por rango de fechas y exportación CSV.
-- **Configuración:** nombre de operación, horario predeterminado, minutos de tolerancia y sedes. El horario predeterminado se propone para nuevos trabajadores; cada ficha conserva su horario individual.
+- **Configuración:** nombre de operación, horario predeterminado, minutos de tolerancia, sedes y zona horaria. El horario predeterminado se propone para nuevos trabajadores; cada ficha conserva su horario individual.
+- **Apariencia:** tema claro u oscuro, color principal e imagen de fondo; las preferencias se guardan en PostgreSQL y se comparten con las cuentas.
 - **Equipo:** registro de personal y administración de roles.
 
 ## Datos y persistencia
@@ -154,6 +164,7 @@ El servicio independiente en [`face-service`](face-service) genera vectores de 5
 - Cambia `JWT_SECRET`, la contraseña de PostgreSQL y la clave inicial antes de cualquier despliegue público.
 - Solicita consentimiento informado para el tratamiento biométrico y cumple la normativa aplicable.
 - No hay prueba de vida: la validación facial no impide por sí sola suplantación con foto o vídeo.
+- La cámara se apaga tras capturar una muestra o completar el acceso facial, y también al cerrar el formulario o salir del modo facial.
 - Los reportes muestran jornadas con marcaciones; no deducen faltas en días sin registros porque aún no existe calendario laboral por persona.
 - La flota registra unidades y estado; todavía no incluye GPS, asignación de conductores ni historial de mantenimiento.
 - No expongas PostgreSQL ni el servicio facial directamente a Internet.
