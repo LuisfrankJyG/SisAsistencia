@@ -61,6 +61,7 @@ async function faceEmbedding(imageBase64) {
 function workerSession(user) { return { token: sign(user), user: { id: user.id, username: user.username, role: user.role, firstName: user.first_name || 'Administrador', lastName: user.last_name || '' } } }
 function authenticate(req, res, next) { const token = req.headers.authorization?.replace('Bearer ', ''); if (!token) return res.status(401).json({ message: 'Sesión requerida.' }); try { req.auth = jwt.verify(token, secret); next() } catch { res.status(401).json({ message: 'Sesión vencida o inválida.' }) } }
 function adminOnly(req, res, next) { return req.auth.role === 'ADMIN' ? next() : res.status(403).json({ message: 'Solo administradores.' }) }
+function isValidDate(value) { if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false; const date = new Date(`${value}T00:00:00.000Z`); return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value }
 
 app.get('/api/health', async (_req, res) => { try { await pool.query('SELECT 1'); res.json({ status: 'ok', database: 'connected' }) } catch { res.status(503).json({ status: 'error', database: 'unavailable' }) } })
 app.post('/api/auth/login', loginLimiter, async (req, res) => {
@@ -114,11 +115,11 @@ app.post('/api/workers/:id/facial-template', authenticate, adminOnly, async (req
   } catch (error) { res.status(422).json({ message: error.message }) }
 })
 app.patch('/api/workers/:id/role', authenticate, adminOnly, async (req, res) => { const role = z.enum(['ADMIN','TRABAJADOR']).safeParse(req.body.role); if (!role.success) return res.status(400).json({ message: 'Rol inválido.' }); const result = await pool.query('UPDATE users SET role=$1 WHERE worker_id=$2 RETURNING role', [role.data,req.params.id]); result.rowCount ? res.json(result.rows[0]) : res.status(404).json({ message: 'Trabajador no encontrado.' }) })
-app.post('/api/attendance/clock', authenticate, async (req, res) => { const { rows: users } = await pool.query('SELECT worker_id FROM users WHERE id=$1', [req.auth.sub]); if (!users[0]?.worker_id) return res.status(400).json({ message: 'La cuenta administradora no registra asistencia.' }); const { rows: previous } = await pool.query('SELECT record_type FROM attendance_records WHERE worker_id=$1 ORDER BY recorded_at DESC LIMIT 1', [users[0].worker_id]); const type = previous[0]?.record_type === 'ENTRADA' ? 'SALIDA' : 'ENTRADA'; const result = await pool.query(`INSERT INTO attendance_records(worker_id,record_type,method) VALUES($1,$2,'MANUAL') RETURNING id,record_type,recorded_at`, [users[0].worker_id,type]); res.status(201).json(result.rows[0]) })
+app.post('/api/attendance/clock', authenticate, async (req, res) => { const { rows: users } = await pool.query('SELECT worker_id FROM users WHERE id=$1 AND active', [req.auth.sub]); if (!users[0]?.worker_id) return res.status(400).json({ message: 'La cuenta administradora no registra asistencia.' }); const { rows: previous } = await pool.query('SELECT record_type FROM attendance_records WHERE worker_id=$1 AND recorded_at::date=CURRENT_DATE ORDER BY recorded_at DESC LIMIT 1', [users[0].worker_id]); const type = previous[0]?.record_type === 'ENTRADA' ? 'SALIDA' : 'ENTRADA'; const result = await pool.query(`INSERT INTO attendance_records(worker_id,record_type,method) VALUES($1,$2,'MANUAL') RETURNING id,record_type,recorded_at`, [users[0].worker_id,type]); res.status(201).json(result.rows[0]) })
 app.get('/api/attendance', authenticate, async (req, res) => {
-  const date = z.string().regex(/^\d{4}-\d{2}-\d{2}$/).safeParse(req.query.date || new Date().toISOString().slice(0, 10))
-  if (!date.success) return res.status(400).json({ message: 'Fecha inválida.' })
-  const params = [date.data]
+  const date = req.query.date || new Date().toISOString().slice(0, 10)
+  if (!isValidDate(date)) return res.status(400).json({ message: 'Fecha inválida. Usa el formato AAAA-MM-DD.' })
+  const params = [date]
   let workerClause = ''
   if (req.auth.role !== 'ADMIN') {
     params.push(req.auth.sub)
@@ -132,23 +133,30 @@ app.get('/api/attendance', authenticate, async (req, res) => {
 })
 app.get('/api/reports/attendance', authenticate, adminOnly, async (req, res) => {
   const today = new Date().toISOString().slice(0, 10)
-  const parsed = z.object({ from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/), to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) }).safeParse({ from: req.query.from || today, to: req.query.to || today })
-  if (!parsed.success || parsed.data.from > parsed.data.to) return res.status(400).json({ message: 'Indica un rango de fechas válido.' })
-  const { rows } = await pool.query(`WITH daily AS (
-    SELECT worker_id, recorded_at::date work_date,
+  const from = req.query.from || today
+  const to = req.query.to || today
+  if (!isValidDate(from) || !isValidDate(to) || from > to) return res.status(400).json({ message: 'Indica un rango de fechas válido.' })
+  const { rows } = await pool.query(`WITH ordered AS (
+    SELECT worker_id,recorded_at::date work_date,record_type,recorded_at,
+      lead(record_type) OVER(PARTITION BY worker_id,recorded_at::date ORDER BY recorded_at) next_type,
+      lead(recorded_at) OVER(PARTITION BY worker_id,recorded_at::date ORDER BY recorded_at) next_at
+    FROM attendance_records WHERE recorded_at::date BETWEEN $1::date AND $2::date
+  ), daily AS (
+    SELECT worker_id,work_date,
       min(recorded_at) FILTER (WHERE record_type='ENTRADA') first_entry,
-      max(recorded_at) FILTER (WHERE record_type='SALIDA') last_exit
-    FROM attendance_records WHERE recorded_at::date BETWEEN $1::date AND $2::date GROUP BY worker_id,recorded_at::date
+      max(recorded_at) FILTER (WHERE record_type='SALIDA') last_exit,
+      COALESCE(sum(GREATEST(0,FLOOR(EXTRACT(EPOCH FROM (next_at-recorded_at))/60)::int)) FILTER (WHERE record_type='ENTRADA' AND next_type='SALIDA'),0)::int worked_minutes
+    FROM ordered GROUP BY worker_id,work_date
   )
   SELECT w.id worker_id,w.document_number,w.first_name,w.last_name,w.position,w.department,w.scheduled_start,
     d.work_date,d.first_entry,d.last_exit,
     CASE WHEN d.first_entry IS NULL THEN NULL WHEN w.scheduled_start IS NULL THEN 0
       ELSE GREATEST(0,FLOOR(EXTRACT(EPOCH FROM (d.first_entry::time-w.scheduled_start))/60)::int-COALESCE(s.grace_minutes,10)) END late_minutes,
-    CASE WHEN d.first_entry IS NOT NULL AND d.last_exit IS NOT NULL THEN GREATEST(0,FLOOR(EXTRACT(EPOCH FROM (d.last_exit-d.first_entry))/60)::int) ELSE 0 END worked_minutes,
+    d.worked_minutes,
     CASE WHEN d.first_entry IS NULL THEN 'SIN ENTRADA' WHEN d.last_exit IS NULL THEN 'EN TURNO'
       WHEN w.scheduled_start IS NOT NULL AND d.first_entry::time > w.scheduled_start + make_interval(mins => COALESCE(s.grace_minutes,10)) THEN 'TARDE' ELSE 'COMPLETO' END status
   FROM daily d JOIN workers w ON w.id=d.worker_id LEFT JOIN app_settings s ON s.id=TRUE
-  WHERE w.active ORDER BY d.work_date DESC,w.first_name,w.last_name`, [parsed.data.from, parsed.data.to])
+  WHERE w.active ORDER BY d.work_date DESC,w.first_name,w.last_name`, [from, to])
   res.json(rows)
 })
 app.get('/api/settings', authenticate, adminOnly, async (_req, res) => {

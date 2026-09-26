@@ -10,6 +10,15 @@ Aplicación web para administrar personal y asistencia de una operación de tran
 - **Configuración:** persistir nombre de operación, horario predeterminado, tolerancia de tardanza y sedes.
 - La API crea las tablas de configuración y flota al iniciar, incluso si se actualiza una base ya existente.
 
+## Correcciones de esta revisión
+
+- El modo de desarrollo de Node.js observa únicamente `api/src`; las modificaciones en dependencias ya no reinician la API ni interrumpen solicitudes.
+- La interfaz presenta un mensaje claro si no puede conectar con la API y recupera una sesión guardada que esté dañada o vencida.
+- Las consultas de fechas rechazan fechas inexistentes y rangos invertidos con un error `400` legible.
+- El cálculo de horas suma los pares de entrada/salida, y el primer registro de cada día empieza como entrada aunque haya quedado una jornada anterior sin cerrar.
+- El portal del trabajador ya no muestra controles de administración. El horario se presenta desde los campos que realmente devuelve la API.
+- Se corrigieron las advertencias del linter de React.
+
 ## Requisitos
 
 - Windows 10/11, macOS o Linux.

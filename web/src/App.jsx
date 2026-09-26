@@ -1,9 +1,18 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 
 const initialForm = { firstName: '', lastName: '', document: '', position: '', department: '', username: '', password: '', schedule: '08:00 — 17:00' }
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3000/api'
 const localDate = () => { const date = new Date(); return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}` }
+function readStoredSession() {
+  try {
+    const stored = JSON.parse(localStorage.getItem('asistencia-session') || 'null')
+    return stored?.token ? stored : null
+  } catch {
+    localStorage.removeItem('asistencia-session')
+    return null
+  }
+}
 
 function App() {
   const [view, setView] = useState('inicio')
@@ -11,7 +20,7 @@ function App() {
   const [step, setStep] = useState(1)
   const [form, setForm] = useState(initialForm)
   const [workers, setWorkers] = useState([])
-  const [session, setSession] = useState(() => { const stored = JSON.parse(localStorage.getItem('asistencia-session') || 'null'); return stored?.token ? stored : null })
+  const [session, setSession] = useState(readStoredSession)
   const [apiError, setApiError] = useState('')
   const [showProfileMenu, setShowProfileMenu] = useState(false)
   const [cameraError, setCameraError] = useState('')
@@ -27,15 +36,31 @@ function App() {
 
   useEffect(() => () => stopCamera(), [])
 
-  useEffect(() => { if (session?.role === 'ADMIN') loadWorkers() }, [session?.token])
-
-  async function request(path, options = {}) {
-    const response = await fetch(`${API_URL}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(session?.token ? { Authorization: `Bearer ${session.token}` } : {}), ...options.headers } })
-    const data = await response.json()
-    if (!response.ok) throw new Error(data.message || 'No se pudo completar la operación.')
+  const request = useCallback(async (path, options = {}) => {
+    let response
+    try {
+      response = await fetch(`${API_URL}${path}`, { ...options, headers: { 'Content-Type': 'application/json', ...(session?.token ? { Authorization: `Bearer ${session.token}` } : {}), ...options.headers } })
+    } catch {
+      throw new Error('No se pudo conectar con la API. Comprueba que el servidor Node.js esté iniciado.')
+    }
+    const body = await response.text()
+    let data = {}
+    try { data = body ? JSON.parse(body) : {} } catch { /* conserva mensaje genérico para respuestas no JSON */ }
+    if (!response.ok) {
+      if (response.status === 401 && session) setSession(null)
+      throw new Error(data.message || `La API respondió con el error ${response.status}.`)
+    }
     return data
-  }
-  async function loadWorkers() { try { setWorkers(await request('/workers')) } catch (error) { setApiError(error.message) } }
+  }, [session, setSession])
+  useEffect(() => {
+    if (session?.role !== 'ADMIN') return undefined
+    let current = true
+    // Esta actualización ocurre al resolver la consulta asíncrona de la API.
+    // eslint-disable-next-line react/set-state-in-effect
+    request('/workers').then((data) => { if (current) { setWorkers(data); setApiError('') } })
+      .catch((error) => { if (current) setApiError(error.message) })
+    return () => { current = false }
+  }, [session?.role, request])
 
   function stopCamera() {
     videoRef.current?.srcObject?.getTracks().forEach((track) => track.stop())
@@ -122,7 +147,7 @@ function App() {
 
   const content = {
     inicio: <Dashboard workers={workers} session={session} onNewWorker={openWorkerModal} onViewWorkers={() => setView('trabajadores')} />,
-    trabajadores: <Workers workers={workers} isAdmin={session.role === 'ADMIN'} onNewWorker={openWorkerModal} onChangeRole={changeRole} />,
+    trabajadores: session.role === 'ADMIN' ? <Workers workers={workers} isAdmin onNewWorker={openWorkerModal} onChangeRole={changeRole} /> : <Attendance session={session} onClock={clock} request={request} />,
     marcaciones: <Attendance session={session} onClock={clock} request={request} />,
     reportes: session.role === 'ADMIN' ? <Reports request={request} /> : <Attendance session={session} onClock={clock} request={request} />,
     configuracion: session.role === 'ADMIN' ? <Settings request={request} /> : <Dashboard workers={workers} session={session} onNewWorker={openWorkerModal} onViewWorkers={() => setView('marcaciones')} />,
@@ -141,7 +166,7 @@ function App() {
           {session.role === 'ADMIN' && <NavButton current={view} id="configuracion" icon="⚙" label="Configuración" onClick={setView} />}
         </nav>
         <div className="system-status"><i /> OPERACIÓN EN LÍNEA</div>
-        <div className="profile-wrap"><button className="profile" onClick={() => setShowProfileMenu(!showProfileMenu)}><div className="avatar">{session.firstName.slice(0, 2).toUpperCase()}</div><span><strong>{session.firstName} {session.lastName}</strong><small>{session.role === 'ADMIN' ? 'Administrador' : 'Trabajador'}</small></span><b>⋮</b></button>{showProfileMenu && <div className="profile-menu"><button onClick={() => { setView('configuracion'); setShowProfileMenu(false) }}>Configuración</button><button onClick={() => setSession(null)}>Cerrar sesión</button></div>}</div>
+        <div className="profile-wrap"><button className="profile" onClick={() => setShowProfileMenu(!showProfileMenu)}><div className="avatar">{session.firstName.slice(0, 2).toUpperCase()}</div><span><strong>{session.firstName} {session.lastName}</strong><small>{session.role === 'ADMIN' ? 'Administrador' : 'Trabajador'}</small></span><b>⋮</b></button>{showProfileMenu && <div className="profile-menu">{session.role === 'ADMIN' ? <button onClick={() => { setView('configuracion'); setShowProfileMenu(false) }}>Configuración</button> : <button onClick={() => { setView('marcaciones'); setShowProfileMenu(false) }}>Mi asistencia</button>}<button onClick={() => setSession(null)}>Cerrar sesión</button></div>}</div>
       </aside>
       <section className="content">{apiError && <p className="error api-error">{apiError}</p>}{content}</section>
       {isModalOpen && <WorkerModal step={step} form={form} faceReady={faceReady} saving={savingWorker} videoRef={videoRef} cameraError={cameraError} onChange={updateForm} onClose={closeWorkerModal} onContinue={continueForm} onBack={() => setStep(step - 1)} onCamera={startCamera} onFaceReady={confirmFaceSample} onSave={saveWorker} />}
@@ -172,15 +197,15 @@ function Login({ onLogin, onFaceLogin, apiError }) {
 function Dashboard({ workers, session, onNewWorker, onViewWorkers }) {
   return <>
     <header><div><p className="eyebrow">CENTRAL DE OPERACIONES · TURNO ACTUAL</p><h1>Hola, <span>{session.firstName}.</span></h1><p className="intro">Tu equipo de ruta, taller y lavado en una sola consola.</p></div>{session.role === 'ADMIN' && <button className="primary glow" onClick={onNewWorker}>＋ Incorporar personal</button>}</header>
-    <section className="stats">
+    {session.role === 'ADMIN' && <section className="stats">
       <Stat label="Equipo en sistema" value={workers.length} trend="Personal de operación" icon="◉" tone="cyan" />
       <Stat label="Personal en turno" value="0" trend="Esperando marcaciones" icon="✓" tone="violet" />
       <Stat label="Bahías activas" value="0" trend="Lavado y mantenimiento" icon="◷" tone="amber" />
       <Stat label="Validación facial" value="—" trend="Sin lecturas aún" icon="◆" tone="pink" />
-    </section>
-    <section className="panel live-panel"><div className="panel-heading"><div><p className="eyebrow">ACTIVIDAD DE OPERACIÓN</p><h2>Monitor de turnos <i>●</i></h2></div><button className="text-button" onClick={onViewWorkers}>Ver equipo →</button></div>
-      {workers.length ? <div className="worker-preview">{workers.slice(0, 3).map((worker) => <div key={worker.id}><span className="worker-orb">{worker.firstName[0]}{worker.lastName[0]}</span><strong>{worker.firstName} {worker.lastName}</strong><small>Plantilla facial lista</small><b>REGISTRADO</b></div>)}</div> : <EmptyState onNewWorker={onNewWorker} />}
-    </section>
+    </section>}
+    {session.role === 'ADMIN' ? <section className="panel live-panel"><div className="panel-heading"><div><p className="eyebrow">ACTIVIDAD DE OPERACIÓN</p><h2>Monitor de turnos <i>●</i></h2></div><button className="text-button" onClick={onViewWorkers}>Ver equipo →</button></div>
+      {workers.length ? <div className="worker-preview">{workers.slice(0, 3).map((worker) => <div key={worker.id}><span className="worker-orb">{worker.firstName[0]}{worker.lastName[0]}</span><strong>{worker.firstName} {worker.lastName}</strong><small>{worker.faceReady ? 'Plantilla facial lista' : 'Sin plantilla facial'}</small><b>REGISTRADO</b></div>)}</div> : <EmptyState onNewWorker={onNewWorker} />}
+    </section> : <section className="panel employee-home"><p className="eyebrow">PORTAL DEL TRABAJADOR</p><h2>Tu jornada empieza aquí.</h2><p>Consulta tu historial y registra entrada o salida en el módulo Turnos.</p><button className="primary glow" onClick={onViewWorkers}>Ir a mi asistencia →</button></section>}
   </>
 }
 
@@ -193,7 +218,7 @@ function Workers({ workers, isAdmin, onNewWorker, onChangeRole }) {
   const visibleWorkers = workers.filter((worker) => `${worker.firstName} ${worker.lastName} ${worker.document}`.toLowerCase().includes(query.toLowerCase()))
   return <><header><div><p className="eyebrow">DIRECTORIO DE PERSONAL</p><h1>Tu <span>equipo.</span></h1><p className="intro">Identidades y permisos centralizados.</p></div>{isAdmin && <button className="primary glow" onClick={onNewWorker}>＋ Nuevo trabajador</button>}</header>
     <section className="panel directory"><div className="panel-heading"><h2>Personal registrado <b>{workers.length}</b></h2><div className="search">⌕ <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar por nombre o documento" /></div></div>
-      {workers.length ? <div className="table">{visibleWorkers.length ? visibleWorkers.map((worker) => <div className="worker-row" key={worker.id}><span className="worker-orb">{worker.firstName[0]}{worker.lastName[0]}</span><div><strong>{worker.firstName} {worker.lastName}</strong><small>{worker.position || 'Sin cargo'} · {worker.department || 'General'}</small></div><span className="chip">◈ Rostro verificado</span><span>{worker.schedule}</span>{isAdmin ? <label className="role-control">Rol<select value={worker.role || 'TRABAJADOR'} onChange={(event) => onChangeRole(worker.id, event.target.value)}><option value="TRABAJADOR">Trabajador</option><option value="ADMIN">Administrador</option></select></label> : <span>{worker.role === 'ADMIN' ? 'Administrador' : 'Trabajador'}</span>}</div>) : <p className="no-results">No encontramos coincidencias para esa búsqueda.</p>}</div> : <EmptyState onNewWorker={onNewWorker} />}
+      {workers.length ? <div className="table">{visibleWorkers.length ? visibleWorkers.map((worker) => <div className="worker-row" key={worker.id}><span className="worker-orb">{worker.firstName[0]}{worker.lastName[0]}</span><div><strong>{worker.firstName} {worker.lastName}</strong><small>{worker.position || 'Sin cargo'} · {worker.department || 'General'}</small></div><span className="chip">◈ Rostro verificado</span><span>{worker.scheduleStart?.slice(0, 5) || '08:00'} — {worker.scheduleEnd?.slice(0, 5) || '17:00'}</span>{isAdmin ? <label className="role-control">Rol<select value={worker.role || 'TRABAJADOR'} onChange={(event) => onChangeRole(worker.id, event.target.value)}><option value="TRABAJADOR">Trabajador</option><option value="ADMIN">Administrador</option></select></label> : <span>{worker.role === 'ADMIN' ? 'Administrador' : 'Trabajador'}</span>}</div>) : <p className="no-results">No encontramos coincidencias para esa búsqueda.</p>}</div> : <EmptyState onNewWorker={onNewWorker} />}
     </section></>
 }
 
@@ -205,11 +230,16 @@ function Attendance({ session, onClock, request }) {
   const [loading, setLoading] = useState(false)
   async function loadRecords() {
     setLoading(true)
-    try { setRecords(await request(`/attendance?date=${date}`)); setError('') }
+    try { const data = await request(`/attendance?date=${date}`); setRecords(data); setRecord(data[0] || null); setError('') }
     catch (requestError) { setError(requestError.message) }
     finally { setLoading(false) }
   }
-  useEffect(() => { loadRecords() }, [date])
+  useEffect(() => {
+    let current = true
+    request(`/attendance?date=${date}`).then((data) => { if (current) { setRecords(data); setRecord(data[0] || null); setError('') } })
+      .catch((requestError) => { if (current) setError(requestError.message) })
+    return () => { current = false }
+  }, [date, request])
   async function register() { try { setError(''); setRecord(await onClock()) } catch (requestError) { setError(requestError.message) } }
   if (session.role === 'ADMIN') return <>
     <header><div><p className="eyebrow">SUPERVISIÓN · MARCACIONES</p><h1>Turnos <span>en vivo.</span></h1><p className="intro">Actividad registrada del equipo por fecha.</p></div><label className="date-filter">Fecha<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label></header>
@@ -234,8 +264,13 @@ function Reports({ request }) {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
   async function load() { setLoading(true); setError(''); try { setRows(await request(`/reports/attendance?from=${from}&to=${to}`)) } catch (e) { setError(e.message) } finally { setLoading(false) } }
-  async function loadFleet() { try { setVehicles(await request('/fleet')) } catch (e) { setError(e.message) } }
-  useEffect(() => { load(); loadFleet() }, [])
+  useEffect(() => {
+    let current = true
+    Promise.all([request(`/reports/attendance?from=${today}&to=${today}`), request('/fleet')])
+      .then(([reportRows, fleetRows]) => { if (current) { setRows(reportRows); setVehicles(fleetRows) } })
+      .catch((e) => { if (current) setError(e.message) })
+    return () => { current = false }
+  }, [request, today])
   async function addVehicle(event) {
     event.preventDefault(); setError('')
     try { const vehicle = await request('/fleet', { method: 'POST', body: JSON.stringify(vehicleForm) }); setVehicles((current) => [...current, vehicle].sort((a,b) => a.plate.localeCompare(b.plate))); setVehicleForm({ plate: '', label: '', vehicleType: 'Unidad', notes: '' }) }
@@ -276,7 +311,11 @@ function Settings({ request }) {
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
-  useEffect(() => { request('/settings').then((data) => { setSettings(data); setLocationsText((data.locations || []).join('\n')) }).catch((e) => setError(e.message)) }, [])
+  useEffect(() => {
+    let current = true
+    request('/settings').then((data) => { if (current) { setSettings(data); setLocationsText((data.locations || []).join('\n')) } }).catch((e) => { if (current) setError(e.message) })
+    return () => { current = false }
+  }, [request])
   function update(event) { setSettings({ ...settings, [event.target.name]: event.target.type === 'number' ? Number(event.target.value) : event.target.value }); setNotice('') }
   async function save(event) {
     event.preventDefault(); setSaving(true); setNotice(''); setError('')

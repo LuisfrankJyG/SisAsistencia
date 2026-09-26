@@ -49,6 +49,9 @@ nav { display: grid; gap: 7px; } nav button { color: #8ea7bd; display: flex; ali
 .fleet-form input { min-width: 0; width: 100%; padding: 10px; border: 1px solid var(--line); border-radius: 7px; outline: 0; background: rgba(0,0,0,.2); color: white; font: inherit; }
 .fleet-row { min-width: 700px; grid-template-columns: 1.5fr 1fr 1fr .6fr; }
 .fleet-row select { justify-self: start; padding: 7px; border: 1px solid var(--line); border-radius: 6px; background: #191e20; color: #e5d5ad; font: inherit; font-size: 10px; }
+.employee-home { min-height: 0; max-width: 620px; padding: 28px; margin: 35px 0; }
+.employee-home h2 { font-size: 21px; }
+.employee-home p:not(.eyebrow) { max-width: 440px; color: var(--muted); font-size: 13px; line-height: 1.55; }
 @media (max-width: 540px) { .filters-panel { align-items: stretch; flex-direction: column; }.filters-panel input { width: 100%; }.settings-fields { grid-template-columns: 1fr; padding: 18px; }.settings-fields .locations-field { grid-column: auto; }.settings-footer { flex-wrap: wrap; padding: 0 18px 18px; }.settings-footer .primary { margin-left: 0; width: 100%; }.date-filter { width: 100%; }.date-filter input { width: 100%; } }
 @media (max-width: 880px) { .fleet-form { grid-template-columns: 1fr 1fr; } }
 @media (max-width: 540px) { .fleet-form { grid-template-columns: 1fr; } }
